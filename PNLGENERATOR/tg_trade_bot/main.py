@@ -977,11 +977,11 @@ def draw_side_badge(draw, x, y, text, color, exchange, fonts_cfg, cfg=None):
     x2, y2 = x1 + box_w, y1 + box_h
     badge_style = fonts_cfg.get("badge_style", "outline")
     if badge_style == "filled":
-        # BingX: заливка цветом, белый текст
+        # Bybit / BingX: заливка цветом, белый текст
         draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=color)
         text_color = (255, 255, 255)
     else:
-        # Bybit: тёмный фон с цветной рамкой (из template.png: bg=(22,26,29))
+        # outline: тёмный фон с цветной рамкой
         draw.rounded_rectangle(
             (x1, y1, x2, y2), radius=radius,
             fill=(22, 26, 29), outline=color, width=2,
@@ -1067,11 +1067,11 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         clear_by_layout(img, draw, layout, key)
 
     WHITE = (255, 255, 255)
-    # Цвета извлечены пиксельно из реальных шаблонов template.png
+    # Цвета из реальных скриншотов приложений
     if exchange == "bybit":
-        GREEN  = (0, 204, 110)     # зелёный PnL/badge (из template.png)
-        RED    = (255, 55, 84)     # красный badge/PnL (из template.png)
-        ORANGE = (255, 162, 56)    # оранжевый ликвидация (из template.png)
+        GREEN  = (0, 200, 120)     # зелёный PnL/badge (из реального Bybit)
+        RED    = (230, 60, 60)     # красный badge/PnL (из реального Bybit)
+        ORANGE = (245, 166, 89)    # оранжевый ликвидация
     else:  # bingx
         GREEN  = (62, 146, 103)    # зелёный badge fill (из template.png)
         RED    = (218, 102, 97)    # красный PnL (из template.png)

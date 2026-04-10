@@ -14,7 +14,7 @@ FONTS = {
             "liq": 37,
             "badge": 42,
         },
-        "badge_style": "outline",
+        "badge_style": "filled",
     },
     "bingx": {
         "files": {
