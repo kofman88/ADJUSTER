@@ -48,6 +48,40 @@ FONTS = {
         },
         "badge_style": "filled",
     },
+    "okx": {
+        "files": {
+            "regular": "fonts/SF_Pro_Display_Regular.otf",
+            "bold": "fonts/SF_Pro_Display_Semibold.otf",
+        },
+        "sizes": {
+            "symbol": 54,
+            "pnl": 42,
+            "leverage": 22,
+            "qty": 37,
+            "entry": 37,
+            "mark": 37,
+            "liq": 37,
+            "badge": 42,
+        },
+        "badge_style": "filled",
+    },
+    "bitget": {
+        "files": {
+            "regular": "fonts/SF_Pro_Display_Regular.otf",
+            "bold": "fonts/SF_Pro_Display_Semibold.otf",
+        },
+        "sizes": {
+            "symbol": 54,
+            "pnl": 42,
+            "leverage": 22,
+            "qty": 37,
+            "entry": 37,
+            "mark": 37,
+            "liq": 37,
+            "badge": 42,
+        },
+        "badge_style": "filled",
+    },
     "custom_bybit": {
         "files": {
             "regular": "fonts/SF_Pro_Display_Regular.otf",

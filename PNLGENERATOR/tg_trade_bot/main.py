@@ -11,7 +11,8 @@ logger = logging.getLogger(__name__)
 
 from cachetools import TTLCache
 import aiohttp
-from access import activate_trial, grant_access, revoke_access, check_access, days_left
+from access import activate_trial, grant_access, revoke_access, check_access, days_left, check_daily_limit, increment_usage, get_referral_code, get_referral_stats, use_referral
+from i18n import t, get_lang, set_lang
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "445677777"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@kofman88")
@@ -24,6 +25,9 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     FSInputFile,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
 )
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -738,6 +742,21 @@ async def get_leverage(message: Message, state: FSMContext):
     )
     liquidation = calculate_liquidation(data["entry"], leverage, data["side"])
     data.update(leverage=leverage, qty=qty, liquidation=liquidation, cost=cost)
+    if message.from_user.username:
+        data["telegram_username"] = message.from_user.username
+
+    # Check daily limit for non-premium users
+    has_access, _ = check_access(message.from_user.id)
+    if not has_access:
+        can_use, remaining = check_daily_limit(message.from_user.id)
+        if not can_use:
+            await message.answer(
+                "🔒 Лимит 3 бесплатных скрина в день исчерпан.\n"
+                f"Напиши {ADMIN_USERNAME} для полного доступа.",
+                reply_markup=restart_kb
+            )
+            await state.clear()
+            return
 
     # PIL-рендеринг в пуле потоков
     loop = asyncio.get_event_loop()
@@ -746,6 +765,10 @@ async def get_leverage(message: Message, state: FSMContext):
             _THREAD_POOL, generate_trade_image, data, percent, percent, pnl_usdt
         )
         await message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+        # Increment usage for free users
+        has_access, _ = check_access(message.from_user.id)
+        if not has_access:
+            increment_usage(message.from_user.id)
     except Exception as e:
         logger.error(f"Image generation error: {e}")
         await message.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
@@ -864,6 +887,14 @@ def format_price(value: float, precision: int | None = None) -> str:
     elif value >= 1:
         return f"{value:,.4f}".rstrip("0").rstrip(".")
     return f"{value:.8f}".rstrip("0").rstrip(".")
+
+def format_qty(value: float) -> str:
+    """Format large quantities: 2000000 -> 2.000M, 1500 -> 1,500"""
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:,.3f}M"
+    if abs(value) >= 1_000:
+        return f"{value:,.0f}"
+    return f"{value:,.4f}"
 
 def calculate_liquidation(entry: float, leverage: int | float, side: str, mm: float = 0.005) -> float:
     if leverage <= 0 or entry <= 0:
@@ -1154,13 +1185,13 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     if exchange == "bybit":
         # Bybit: количество монет
         qty_value = float(data.get("qty") or 0)
-        qty_text = f"{qty_value:.4f}"
+        qty_text = format_qty(qty_value)
     else:  # bingx
         # BingX: маржа * плечо (позиция в USDT)
         margin = float(data.get("amount") or 0)
         lev = float(data.get("leverage") or 0)
         qty_value = margin * lev
-        qty_text = f"{qty_value:.2f}"
+        qty_text = format_qty(qty_value)
 
     # рисуем qty для ОБЕИХ бирж
     draw_text(
@@ -1237,6 +1268,15 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         draw.text((rx, ry), risk_text, fill=risk_color,
                   font=_load_font(font_regular, sizes["qty"]),
                   anchor=layout["risk"]["anchor"])
+
+    # Watermark (subtle, bottom-right corner)
+    if data.get("telegram_username"):
+        wm_font = _load_font(font_regular, max(12, int(h * 0.025)))
+        wm_text = f"@{data['telegram_username']}"
+        wm_x = w - 10
+        wm_y = h - 10
+        # Semi-transparent by drawing in dark gray
+        draw.text((wm_x, wm_y), wm_text, fill=(60, 60, 65), font=wm_font, anchor="rb")
 
     img.save(output_path)
     # Синхронная очистка старых файлов — здесь мы уже в пуле потоков
@@ -1968,6 +2008,85 @@ async def custom_finish(msg: Message, state: FSMContext):
         logger.error(f"Image generation error: {e}")
         await msg.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
     await state.clear()
+
+# =====================================================
+# REFERRAL COMMANDS
+# =====================================================
+@dp.message(Command("referral"))
+async def cmd_referral(message: Message):
+    user_id = message.from_user.id
+    code = get_referral_code(user_id)
+    count, needed = get_referral_stats(user_id)
+    text = (
+        f"🎁 Твой реферальный код: `{code}`\n\n"
+        f"Приглашено: {count}/3\n"
+    )
+    if needed > 0:
+        text += f"Ещё {needed} приглашений = 7 дней бесплатно!\n"
+    else:
+        text += "✅ Награда получена!\n"
+    text += f"\nПоделись кодом с друзьями."
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("ref"))
+async def cmd_use_ref(message: Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /ref REF123456")
+        return
+    code = parts[1].strip().upper()
+    success, msg = use_referral(message.from_user.id, code)
+    await message.answer(f"{'✅' if success else '❌'} {msg}")
+
+# =====================================================
+# LANGUAGE TOGGLE
+# =====================================================
+@dp.message(Command("lang"))
+async def cmd_lang(message: Message):
+    current = get_lang(message.from_user.id)
+    new_lang = "en" if current == "ru" else "ru"
+    set_lang(message.from_user.id, new_lang)
+    if new_lang == "en":
+        await message.answer("🇬🇧 Language switched to English")
+    else:
+        await message.answer("🇷🇺 Язык переключён на Русский")
+
+# =====================================================
+# INLINE MODE
+# =====================================================
+@dp.inline_query()
+async def inline_pnl(query: InlineQuery):
+    """Inline mode: @bot BTCUSDT +150% 50x"""
+    text = query.query.strip()
+    if not text:
+        return
+    parts = text.split()
+    if len(parts) < 2:
+        return
+    symbol = parts[0].upper()
+    try:
+        pnl = float(parts[1].replace("%", "").replace("+", ""))
+    except ValueError:
+        return
+    leverage = 10
+    if len(parts) >= 3:
+        try:
+            leverage = int(parts[2].replace("x", "").replace("X", ""))
+        except ValueError:
+            pass
+    side = "long" if pnl >= 0 else "short"
+    result_text = f"📊 {symbol} | {'🟢 Лонг' if side == 'long' else '🔴 Шорт'} {leverage}x\n💰 ROI: {pnl:+.2f}%"
+    results = [
+        InlineQueryResultArticle(
+            id="1",
+            title=f"{symbol} {pnl:+.2f}% ({leverage}x)",
+            description=f"{'Лонг' if side == 'long' else 'Шорт'} | Нажми чтобы отправить",
+            input_message_content=InputTextMessageContent(
+                message_text=result_text,
+            ),
+        )
+    ]
+    await query.answer(results, cache_time=5)
 
 # =====================================================
 # ЗАПУСК

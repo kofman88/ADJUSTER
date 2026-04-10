@@ -3,6 +3,7 @@ import os
 from datetime import datetime, timedelta
 
 ACCESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "access.json")
+REFERRAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "referrals.json")
 
 TRIAL_DAYS = 2
 FULL_DAYS = 30
@@ -79,3 +80,83 @@ def days_left(user_id: int) -> int:
     expires = datetime.fromisoformat(user["expires"])
     delta = expires - datetime.now()
     return max(0, delta.days)
+
+
+# =====================================================
+# DAILY LIMIT (free users)
+# =====================================================
+_DAILY_USAGE: dict[int, dict] = {}
+
+def check_daily_limit(user_id: int, max_free: int = 3) -> tuple[bool, int]:
+    """Check if user exceeded daily free limit. Returns (can_use, remaining)."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    usage = _DAILY_USAGE.get(user_id, {})
+    if usage.get("date") != today:
+        usage = {"date": today, "count": 0}
+        _DAILY_USAGE[user_id] = usage
+    remaining = max(0, max_free - usage["count"])
+    return remaining > 0, remaining
+
+def increment_usage(user_id: int):
+    """Increment daily usage counter."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    usage = _DAILY_USAGE.get(user_id, {})
+    if usage.get("date") != today:
+        usage = {"date": today, "count": 0}
+        _DAILY_USAGE[user_id] = usage
+    usage["count"] += 1
+    _DAILY_USAGE[user_id] = usage
+
+
+# =====================================================
+# REFERRAL PROGRAM
+# =====================================================
+def _load_referrals() -> dict:
+    if os.path.exists(REFERRAL_FILE):
+        with open(REFERRAL_FILE) as f:
+            return json.load(f)
+    return {}
+
+def _save_referrals(data: dict):
+    with open(REFERRAL_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def get_referral_code(user_id: int) -> str:
+    """Generate unique referral code for user."""
+    return f"REF{user_id}"
+
+def use_referral(user_id: int, referral_code: str) -> tuple[bool, str]:
+    """Apply referral code. Returns (success, message)."""
+    refs = _load_referrals()
+    # Extract referrer ID from code
+    if not referral_code.startswith("REF"):
+        return False, "Неверный код"
+    try:
+        referrer_id = int(referral_code.replace("REF", ""))
+    except ValueError:
+        return False, "Неверный код"
+    if referrer_id == user_id:
+        return False, "Нельзя использовать свой код"
+    # Check if already used
+    used_by = refs.get(str(referrer_id), {}).get("used_by", [])
+    if user_id in used_by:
+        return False, "Вы уже использовали этот код"
+    # Add referral
+    if str(referrer_id) not in refs:
+        refs[str(referrer_id)] = {"used_by": [], "rewarded": False}
+    refs[str(referrer_id)]["used_by"].append(user_id)
+    # Check if referrer earned reward (3 referrals = 7 days)
+    if len(refs[str(referrer_id)]["used_by"]) >= 3 and not refs[str(referrer_id)]["rewarded"]:
+        grant_access(referrer_id, days=7)
+        refs[str(referrer_id)]["rewarded"] = True
+        _save_referrals(refs)
+        return True, f"Код применён! Пригласивший получил 7 дней доступа."
+    _save_referrals(refs)
+    return True, "Код применён! Спасибо."
+
+def get_referral_stats(user_id: int) -> tuple[int, int]:
+    """Returns (total_referrals, needed_for_reward)."""
+    refs = _load_referrals()
+    data = refs.get(str(user_id), {"used_by": []})
+    count = len(data.get("used_by", []))
+    return count, max(0, 3 - count)
