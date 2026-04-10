@@ -977,15 +977,12 @@ def draw_side_badge(draw, x, y, text, color, exchange, fonts_cfg, cfg=None):
     x2, y2 = x1 + box_w, y1 + box_h
     badge_style = fonts_cfg.get("badge_style", "outline")
     if badge_style == "filled":
-        # Bybit / BingX: заливка цветом, белый текст
+        # BingX: заливка цветом, белый текст
         draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=color)
         text_color = (255, 255, 255)
     else:
-        # outline: тёмный фон с цветной рамкой
-        draw.rounded_rectangle(
-            (x1, y1, x2, y2), radius=radius,
-            fill=(22, 26, 29), outline=color, width=2,
-        )
+        # Bybit: серый фон, цветной текст (зелёный/красный), без рамки
+        draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=(30, 33, 38))
         text_color = color
     text_offset_y = fonts_cfg.get("sizes", {}).get("badge_text_offset_y", 0) if exchange == "bingx" else 0
     draw.text(((x1 + x2) / 2, (y1 + y2) / 2 + text_offset_y), text, fill=text_color, font=font, anchor="mm")
