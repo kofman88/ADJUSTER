@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+PNLGENERATOR/tg_trade_bot/output/result_*.png
+PNLGENERATOR/tg_trade_bot/images/test_*.png

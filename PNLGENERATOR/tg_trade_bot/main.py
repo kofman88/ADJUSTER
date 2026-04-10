@@ -933,10 +933,11 @@ def draw_gray_box(draw, x, y, text, font, cfg):
     bbox = draw.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     box_h = max(min_h, h + padding_y * 2)
+    # Цвет заливки из BingX template.png: (18, 18, 18)
     draw.rounded_rectangle(
         (x - w // 2 - padding_x, y - box_h // 2,
          x + w // 2 + padding_x, y + box_h // 2),
-        radius=radius, fill=(30, 30, 32),
+        radius=radius, fill=(18, 18, 18),
     )
     draw.text((x, y), text, fill=(255, 255, 255), font=font, anchor="mm")
 
@@ -949,8 +950,8 @@ def draw_side_badge(draw, x, y, text, color, exchange, fonts_cfg, cfg=None):
     )
     if exchange == "bingx" and cfg is not None:
         sizes = fonts_cfg.get("sizes", {})
-        is_green = color == (0, 200, 120)
-        if is_green:
+        is_long = (text == "Лонг")
+        if is_long:
             pad_x = sizes.get("badge_pad_green_x", 16)
             pad_y = sizes.get("badge_pad_green_y", 16)
             min_w = sizes.get("badge_min_green_w", 110)
@@ -975,9 +976,17 @@ def draw_side_badge(draw, x, y, text, color, exchange, fonts_cfg, cfg=None):
     x1, y1 = x - box_w // 2, y - box_h // 2
     x2, y2 = x1 + box_w, y1 + box_h
     badge_style = fonts_cfg.get("badge_style", "outline")
-    fill_color = color if badge_style == "filled" else (30, 30, 30)
-    text_color = (255, 255, 255) if badge_style == "filled" else color
-    draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=fill_color)
+    if badge_style == "filled":
+        # BingX: заливка цветом, белый текст
+        draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=color)
+        text_color = (255, 255, 255)
+    else:
+        # Bybit: тёмный фон с цветной рамкой (из template.png: bg=(22,26,29))
+        draw.rounded_rectangle(
+            (x1, y1, x2, y2), radius=radius,
+            fill=(22, 26, 29), outline=color, width=2,
+        )
+        text_color = color
     text_offset_y = fonts_cfg.get("sizes", {}).get("badge_text_offset_y", 0) if exchange == "bingx" else 0
     draw.text(((x1 + x2) / 2, (y1 + y2) / 2 + text_offset_y), text, fill=text_color, font=font, anchor="mm")
 
@@ -1057,9 +1066,16 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
             continue
         clear_by_layout(img, draw, layout, key)
 
-    WHITE, GREEN, ORANGE = (255,255,255), (0,200,120), (245,166,89)
-    # BingX Short badge = тёплый коралловый (#EB5050), как в оригинальном приложении
-    RED = (235, 80, 80) if exchange == "bingx" else (230, 60, 60)
+    WHITE = (255, 255, 255)
+    # Цвета извлечены пиксельно из реальных шаблонов template.png
+    if exchange == "bybit":
+        GREEN  = (0, 204, 110)     # зелёный PnL/badge (из template.png)
+        RED    = (255, 55, 84)     # красный badge/PnL (из template.png)
+        ORANGE = (255, 162, 56)    # оранжевый ликвидация (из template.png)
+    else:  # bingx
+        GREEN  = (62, 146, 103)    # зелёный badge fill (из template.png)
+        RED    = (218, 102, 97)    # красный PnL (из template.png)
+        ORANGE = (255, 162, 56)    # оранжевый ликвидация
     side_color = GREEN if data["side"] == "long" else RED
     pnl_color = GREEN if pnl >= 0 else RED
 
@@ -1217,6 +1233,13 @@ def generate_custom_bybit_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
+    # ── Очищаем переменные зоны ──────────────────────────────
+    clear_keys = ["clear_entry", "clear_exit", "clear_pnl", "clear_leverage"]
+    for key in clear_keys:
+        if key in layout:
+            clear_by_layout(img, draw, layout, key)
+    draw = ImageDraw.Draw(img)
+
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
     if os.path.exists(icon_path) and cfg_icon:
@@ -1233,7 +1256,7 @@ def generate_custom_bybit_image(data: dict) -> str:
     pnl_size = cfg["sizes"]["pnl"]
     _dummy_draw = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
     pnl_x = int(layout["pnl"]["x"] * w)
-    max_pnl_w = int(w * 0.63) - pnl_x  # text slightly overlaps rocket, stops before arrow
+    max_pnl_w = int(w * 0.63) - pnl_x
     while pnl_size > 40:
         _pf = _load_font(fp("bold", True), pnl_size)
         _bb = _dummy_draw.textbbox((0, 0), pnl_text, font=_pf)
@@ -1245,13 +1268,17 @@ def generate_custom_bybit_image(data: dict) -> str:
     exit_font = _load_font(fp("bold", True), cfg["sizes"]["exit"])
     lev_font = _load_font(fp("regular"), cfg["sizes"]["leverage_text"])
 
-    WHITE, GREEN, RED = (255,255,255), (0,200,120), (230,60,60)
+    # Цвета из Bybit share card (pnl_card.py BYBIT_CONFIG)
+    WHITE = (255, 255, 255)
+    GREEN = (0, 208, 132)     # #00D084 — Bybit profit
+    RED   = (255, 59, 92)     # #FF3B5C — Bybit loss
+    GRAY  = (140, 150, 172)   # #8C96AC — серые лейблы
 
     def pos(c):
         return int(c["x"] * w) + c.get("dx", 0), int(c["y"] * h) + c.get("dy", 0)
 
     if "username" in data and "username" in layout:
-        draw.text(pos(layout["username"]), data["username"], fill=WHITE, font=username_font, anchor="lm")
+        draw.text(pos(layout["username"]), data["username"], fill=GRAY, font=username_font, anchor="lm")
     if "symbol" in layout:
         draw.text(pos(layout["symbol"]), data["symbol"], fill=WHITE, font=symbol_font, anchor="lm")
     if "pnl" in layout:
@@ -1268,27 +1295,28 @@ def generate_custom_bybit_image(data: dict) -> str:
         sym_bbox = draw.textbbox((0, 0), data["symbol"], font=symbol_font)
         sym_pixel_w = sym_bbox[2] - sym_bbox[0]
         sym_x = int(layout["symbol"]["x"] * w) + layout["symbol"].get("dx", 0)
-        padding_x, padding_y = 16, 10
+        padding_x, padding_y = 18, 10
         bbox = draw.textbbox((0, 0), lev_text, font=lev_font)
         box_w = bbox[2] - bbox[0] + padding_x * 2
         box_h = bbox[3] - bbox[1] + padding_y * 2
-        gap = 16  # gap between symbol text end and badge left edge
+        gap = 16
         badge_center_x = sym_x + sym_pixel_w + gap + box_w // 2
         lev_pos = (badge_center_x, layout["cross_leverage"]["y"] * h)
         x1, y1 = lev_pos[0] - box_w // 2, lev_pos[1] - box_h // 2
         x2, y2 = x1 + box_w, y1 + box_h
+        # Полупрозрачный фон через RGBA overlay (как в pnl_card.py)
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        ImageDraw.Draw(overlay).rounded_rectangle([x1, y1, x2, y2], radius=65, fill=(35, 35, 35, 100))
+        ImageDraw.Draw(overlay).rounded_rectangle(
+            [x1, y1, x2, y2], radius=60,
+            fill=(35, 35, 48, 110),
+        )
         img = Image.alpha_composite(img, overlay)
         draw = ImageDraw.Draw(img)
         text_color = GREEN if data["side"] == "long" else RED
         draw.text(lev_pos, lev_text, fill=text_color, font=lev_font, anchor="mm")
 
     img.save(output_path)
-
-    # Синхронная очистка старых файлов — здесь мы уже в пуле потоков
     _cleanup_old_files(os.path.dirname(output_path), "custom_bybit_")
-
     return output_path
 
 
@@ -1306,6 +1334,13 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
+    # ── Очищаем переменные зоны ──────────────────────────────
+    clear_keys = ["clear_entry", "clear_exit", "clear_pnl", "clear_leverage"]
+    for key in clear_keys:
+        if key in layout:
+            clear_by_layout(img, draw, layout, key)
+    draw = ImageDraw.Draw(img)
+
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
     if os.path.exists(icon_path) and cfg_icon:
@@ -1322,7 +1357,7 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
     pnl_size = cfg["sizes"]["pnl"]
     _dummy_draw = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
     pnl_x = int(layout["pnl"]["x"] * w)
-    max_pnl_w = int(w * 0.63) - pnl_x  # text slightly overlaps rocket, stops before arrow
+    max_pnl_w = int(w * 0.63) - pnl_x
     while pnl_size > 40:
         _pf = _load_font(fp("bold", True), pnl_size)
         _bb = _dummy_draw.textbbox((0, 0), pnl_text, font=_pf)
@@ -1334,13 +1369,17 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
     exit_font = _load_font(fp("bold", True), cfg["sizes"]["exit"])
     lev_font = _load_font(fp("regular"), cfg["sizes"]["leverage_text"])
 
-    WHITE, GREEN, RED = (255,255,255), (0,200,120), (230,60,60)
+    # Цвета из Bybit share card (pnl_card.py BYBIT_CONFIG)
+    WHITE = (255, 255, 255)
+    GREEN = (0, 208, 132)     # #00D084 — Bybit profit
+    RED   = (255, 59, 92)     # #FF3B5C — Bybit loss
+    GRAY  = (140, 150, 172)   # серые лейблы
 
     def pos(c):
         return int(c["x"] * w) + c.get("dx", 0), int(c["y"] * h) + c.get("dy", 0)
 
     if "username" in data and "username" in layout:
-        draw.text(pos(layout["username"]), data["username"], fill=WHITE, font=username_font, anchor="lm")
+        draw.text(pos(layout["username"]), data["username"], fill=GRAY, font=username_font, anchor="lm")
     if "symbol" in layout:
         draw.text(pos(layout["symbol"]), data["symbol"], fill=WHITE, font=symbol_font, anchor="lm")
     if "pnl" in layout:
@@ -1357,7 +1396,7 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
         sym_bbox = draw.textbbox((0, 0), data["symbol"], font=symbol_font)
         sym_pixel_w = sym_bbox[2] - sym_bbox[0]
         sym_x = int(layout["symbol"]["x"] * w) + layout["symbol"].get("dx", 0)
-        padding_x, padding_y = 16, 10
+        padding_x, padding_y = 18, 10
         bbox = draw.textbbox((0, 0), lev_text, font=lev_font)
         box_w = bbox[2] - bbox[0] + padding_x * 2
         box_h = bbox[3] - bbox[1] + padding_y * 2
@@ -1367,7 +1406,10 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
         x1, y1 = lev_pos[0] - box_w // 2, lev_pos[1] - box_h // 2
         x2, y2 = x1 + box_w, y1 + box_h
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
-        ImageDraw.Draw(overlay).rounded_rectangle([x1, y1, x2, y2], radius=65, fill=(35, 35, 35, 100))
+        ImageDraw.Draw(overlay).rounded_rectangle(
+            [x1, y1, x2, y2], radius=60,
+            fill=(35, 35, 48, 110),
+        )
         img = Image.alpha_composite(img, overlay)
         draw = ImageDraw.Draw(img)
         text_color = GREEN if data["side"] == "long" else RED
@@ -1410,7 +1452,11 @@ def generate_custom_bingx_image(data: dict) -> str:
 
     draw_custom_bingx_lines(img, data, layout, small_font, symbol_font, w, h)
 
-    WHITE, GREEN, RED, GRAY = (255,255,255), (0,200,120), (230,60,60), (150,150,150)
+    # Цвета из BingX share card (pnl_card.py BINGX_CONFIG)
+    WHITE = (255, 255, 255)
+    GREEN = (0, 200, 122)      # #00C87A — BingX profit
+    RED   = (255, 45, 120)     # #FF2D78 — BingX loss
+    GRAY  = (130, 140, 165)    # серые лейблы BingX
 
     def pos(c):
         return int(c["x"] * w), int(c["y"] * h)
@@ -1468,8 +1514,8 @@ def draw_custom_bingx_lines(img, data, layout, font_side, font_symbol, w, h):
     side_cfg = layout.get("side_position", {})
     side_x = int(side_cfg.get("x", 0.5) * w)
     side_y = int(side_cfg.get("y", 0.335) * h)
-    side_text = "Long" if data.get("side") == "long" else "Short"
-    side_color = (0, 200, 120) if data.get("side") == "long" else (230, 60, 60)
+    side_text = "Лонг" if data.get("side") == "long" else "Шорт"
+    side_color = (0, 200, 122) if data.get("side") == "long" else (255, 45, 120)
     draw.text((side_x, side_y), side_text, fill=side_color, font=font_side, anchor=side_cfg.get("anchor", "lm"))
     lev_cfg = layout.get("leverage_position", {})
     lev_x = int(lev_cfg.get("x", 0.15) * w)
