@@ -1069,9 +1069,9 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     WHITE = (255, 255, 255)
     # Цвета из реальных скриншотов приложений
     if exchange == "bybit":
-        GREEN  = (0, 200, 120)     # зелёный PnL/badge (из реального Bybit)
-        RED    = (230, 60, 60)     # красный badge/PnL (из реального Bybit)
-        ORANGE = (245, 166, 89)    # оранжевый ликвидация
+        GREEN  = (0, 194, 108)     # зелёный PnL/badge (извлечён из template.png)
+        RED    = (220, 59, 90)     # красный badge/PnL — малиновый (извлечён из template.png)
+        ORANGE = (245, 157, 60)    # оранжевый ликвидация (извлечён из template.png)
     else:  # bingx
         GREEN  = (62, 146, 103)    # зелёный badge fill (из template.png)
         RED    = (218, 102, 97)    # красный PnL (из template.png)
