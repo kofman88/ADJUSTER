@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  pnlbot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=${BOT_TOKEN}
+      - ADMIN_ID=${ADMIN_ID:-445677777}
+    volumes:
+      - ./data:/app/data

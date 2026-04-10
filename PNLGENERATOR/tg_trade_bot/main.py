@@ -4,12 +4,18 @@ import time
 import uuid
 import functools
 from concurrent.futures import ThreadPoolExecutor
+import logging
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logger = logging.getLogger(__name__)
+
 from cachetools import TTLCache
 import aiohttp
-from access import activate_trial, grant_access, revoke_access, check_access, days_left
+from access import activate_trial, grant_access, revoke_access, check_access, days_left, check_daily_limit, increment_usage, get_referral_code, get_referral_stats, use_referral
+from i18n import t, get_lang, set_lang
 
-ADMIN_ID = 445677777  # ← сюда вставь свой Telegram ID
-ADMIN_USERNAME = "@kofman88"  # ← для кнопки "Получить доступ"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "445677777"))
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@kofman88")
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
@@ -19,6 +25,9 @@ from aiogram.types import (
     InlineKeyboardButton,
     CallbackQuery,
     FSInputFile,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
 )
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
@@ -126,13 +135,15 @@ MARATHON: dict[int, dict[str, float]] = {}
 # aiohttp сессия (переиспользуется)
 # =====================================================
 _HTTP_SESSION: aiohttp.ClientSession | None = None
+_HTTP_LOCK = asyncio.Lock()
 
 async def get_http_session() -> aiohttp.ClientSession:
     global _HTTP_SESSION
-    if _HTTP_SESSION is None or _HTTP_SESSION.closed:
-        connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
-        timeout = aiohttp.ClientTimeout(total=5)
-        _HTTP_SESSION = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    async with _HTTP_LOCK:
+        if _HTTP_SESSION is None or _HTTP_SESSION.closed:
+            connector = aiohttp.TCPConnector(limit=100, ttl_dns_cache=300)
+            timeout = aiohttp.ClientTimeout(total=5)
+            _HTTP_SESSION = aiohttp.ClientSession(connector=connector, timeout=timeout)
     return _HTTP_SESSION
 
 # =====================================================
@@ -141,8 +152,8 @@ async def get_http_session() -> aiohttp.ClientSession:
 async def safe_delete_message(message: Message) -> None:
     try:
         await message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Cannot delete message: {e}")
 
 def _cleanup_old_files(directory: str, prefix: str, max_age_seconds: int = 3600) -> None:
     try:
@@ -155,12 +166,16 @@ def _cleanup_old_files(directory: str, prefix: str, max_age_seconds: int = 3600)
                         os.remove(fpath)
                 except OSError:
                     pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
 
 async def parse_float(message: Message) -> float | None:
     try:
-        return float(message.text.replace(",", "."))
+        val = float(message.text.replace(",", "."))
+        if val <= 0:
+            await message.answer("Число должно быть больше 0 🙏")
+            return None
+        return val
     except (ValueError, AttributeError):
         await message.answer("Введите число 🙏")
         return None
@@ -270,8 +285,8 @@ async def cmd_grant(message: Message):
     await message.answer(f"✅ Доступ выдан пользователю {uid} на {days} дней.\nОсталось: {left} дн.")
     try:
         await bot.send_message(uid, f"✅ Вам выдан полный доступ на {days} дней!\nОсталось: {left} дн.")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
 
 @dp.message(Command("revoke"))
 async def cmd_revoke(message: Message):
@@ -374,15 +389,19 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
     }
 
     loop = asyncio.get_event_loop()
-    path = await loop.run_in_executor(
-        _THREAD_POOL,
-        generate_trade_image,
-        data,
-        percent,
-        pnl,
-        pnl_usdt,
-    )
-    await message.answer_photo(FSInputFile(path))
+    try:
+        path = await loop.run_in_executor(
+            _THREAD_POOL,
+            generate_trade_image,
+            data,
+            percent,
+            pnl,
+            pnl_usdt,
+        )
+        await message.answer_photo(FSInputFile(path))
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await message.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
 
 async def _run_custom_test(message: Message, exchange: str, side: str):
     entry = 0.1068
@@ -408,12 +427,15 @@ async def _run_custom_test(message: Message, exchange: str, side: str):
     }
 
     loop = asyncio.get_event_loop()
-    if exchange == "bingx":
-        path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bingx_image, image_data)
-    else:
-        path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_image, image_data)
-
-    await message.answer_photo(FSInputFile(path))
+    try:
+        if exchange == "bingx":
+            path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bingx_image, image_data)
+        else:
+            path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_image, image_data)
+        await message.answer_photo(FSInputFile(path))
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await message.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
 
 
 @dp.message(Command("test_custom_bybit_long"))
@@ -460,8 +482,12 @@ async def _run_custom_usdt_test(message: Message, side: str):
     }
 
     loop = asyncio.get_event_loop()
-    path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_usdt_image, image_data)
-    await message.answer_photo(FSInputFile(path))
+    try:
+        path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_usdt_image, image_data)
+        await message.answer_photo(FSInputFile(path))
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await message.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
 
 
 @dp.message(Command("test_custom_bybit_usdt_long"))
@@ -627,6 +653,10 @@ async def get_symbol(message: Message, state: FSMContext):
     symbol = message.text.upper()
     data = await state.get_data()
     exchange = data.get("exchange")
+    if not exchange:
+        await message.answer("Ошибка: биржа не выбрана. Начните сначала /start")
+        await state.clear()
+        return
     # Получаем точность асинхронно
     precision = await async_get_price_precision(exchange, symbol)
     await state.update_data(symbol=symbol, price_precision=precision, prev_state=TradeForm.symbol)
@@ -712,13 +742,36 @@ async def get_leverage(message: Message, state: FSMContext):
     )
     liquidation = calculate_liquidation(data["entry"], leverage, data["side"])
     data.update(leverage=leverage, qty=qty, liquidation=liquidation, cost=cost)
+    if message.from_user.username:
+        data["telegram_username"] = message.from_user.username
+
+    # Check daily limit for non-premium users
+    has_access, _ = check_access(message.from_user.id)
+    if not has_access:
+        can_use, remaining = check_daily_limit(message.from_user.id)
+        if not can_use:
+            await message.answer(
+                "🔒 Лимит 3 бесплатных скрина в день исчерпан.\n"
+                f"Напиши {ADMIN_USERNAME} для полного доступа.",
+                reply_markup=restart_kb
+            )
+            await state.clear()
+            return
 
     # PIL-рендеринг в пуле потоков
     loop = asyncio.get_event_loop()
-    path = await loop.run_in_executor(
-        _THREAD_POOL, generate_trade_image, data, percent, percent, pnl_usdt
-    )
-    await message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+    try:
+        path = await loop.run_in_executor(
+            _THREAD_POOL, generate_trade_image, data, percent, percent, pnl_usdt
+        )
+        await message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+        # Increment usage for free users
+        has_access, _ = check_access(message.from_user.id)
+        if not has_access:
+            increment_usage(message.from_user.id)
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await message.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
 
     if marathon is not None:
         marathon["balance"] += pnl_usdt
@@ -760,7 +813,7 @@ async def async_get_mark_price(exchange: str, symbol: str) -> float | None:
         _PRICE_CACHE[cache_key] = price
         return price
     except Exception as e:
-        print("MARK PRICE ERROR:", e)
+        logger.error(f"MARK PRICE ERROR: {e}")
         return None
 
 async def async_get_price_precision(exchange: str, symbol: str) -> int | None:
@@ -788,7 +841,7 @@ async def async_get_price_precision(exchange: str, symbol: str) -> int | None:
         _PRECISION_CACHE[cache_key] = precision
         return precision
     except Exception as e:
-        print("PRECISION ERROR:", e)
+        logger.error(f"PRECISION ERROR: {e}")
         return None
 
 # =====================================================
@@ -809,8 +862,8 @@ async def get_mark_from_exchange(call: CallbackQuery, state: FSMContext):
     await state.update_data(mark=price, prev_state=TradeForm.mark)
     try:
         await call.message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
     await show_step(call.message, state, "На какую сумму заходишь? (USDT)", back_kb)
     await state.set_state(TradeForm.amount)
     await call.answer("Цена получена ✅")
@@ -819,6 +872,8 @@ async def get_mark_from_exchange(call: CallbackQuery, state: FSMContext):
 # РАСЧЁТЫ
 # =====================================================
 def calculate_qty(exchange: str, amount: float, entry: float, leverage: int) -> float:
+    if entry <= 0:
+        return 0.0
     qty = amount * leverage / entry
     return round(qty, 4 if exchange == "bybit" else 2)
 
@@ -833,7 +888,17 @@ def format_price(value: float, precision: int | None = None) -> str:
         return f"{value:,.4f}".rstrip("0").rstrip(".")
     return f"{value:.8f}".rstrip("0").rstrip(".")
 
+def format_qty(value: float) -> str:
+    """Format large quantities: 2000000 -> 2.000M, 1500 -> 1,500"""
+    if abs(value) >= 1_000_000:
+        return f"{value / 1_000_000:,.3f}M"
+    if abs(value) >= 1_000:
+        return f"{value:,.0f}"
+    return f"{value:,.4f}"
+
 def calculate_liquidation(entry: float, leverage: int | float, side: str, mm: float = 0.005) -> float:
+    if leverage <= 0 or entry <= 0:
+        return 0.0
     return entry * (1 - 1 / leverage + mm) if side == "long" else entry * (1 + 1 / leverage - mm)
 
 def calculate_cost(exchange: str, amount: float, leverage: int | float) -> float:
@@ -843,7 +908,7 @@ def calculate_pnl_linear(
     entry: float, mark: float, qty: float, side: str, leverage: float
 ) -> tuple[float, float, float]:
     pnl_usd = qty * (mark - entry) if side == "long" else qty * (entry - mark)
-    margin = entry * qty / leverage if leverage else 0.0
+    margin = (entry * qty / leverage) if leverage and entry else 0.0
     pnl_percent = (pnl_usd / margin * 100) if margin > 0 else 0.0
     return round(pnl_usd, 4), round(margin, 4), round(pnl_percent, 2)
 
@@ -915,8 +980,8 @@ async def show_step(
     if last_msg_id:
         try:
             await message.bot.delete_message(message.chat.id, last_msg_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     msg = await message.answer(
         f"{summary}\n{question_text}", parse_mode="HTML", reply_markup=keyboard
     )
@@ -1120,13 +1185,13 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     if exchange == "bybit":
         # Bybit: количество монет
         qty_value = float(data.get("qty") or 0)
-        qty_text = f"{qty_value:.4f}"
+        qty_text = format_qty(qty_value)
     else:  # bingx
         # BingX: маржа * плечо (позиция в USDT)
         margin = float(data.get("amount") or 0)
         lev = float(data.get("leverage") or 0)
         qty_value = margin * lev
-        qty_text = f"{qty_value:.2f}"
+        qty_text = format_qty(qty_value)
 
     # рисуем qty для ОБЕИХ бирж
     draw_text(
@@ -1203,6 +1268,15 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         draw.text((rx, ry), risk_text, fill=risk_color,
                   font=_load_font(font_regular, sizes["qty"]),
                   anchor=layout["risk"]["anchor"])
+
+    # Watermark (subtle, bottom-right corner)
+    if data.get("telegram_username"):
+        wm_font = _load_font(font_regular, max(12, int(h * 0.025)))
+        wm_text = f"@{data['telegram_username']}"
+        wm_x = w - 10
+        wm_y = h - 10
+        # Semi-transparent by drawing in dark gray
+        draw.text((wm_x, wm_y), wm_text, fill=(60, 60, 65), font=wm_font, anchor="rb")
 
     img.save(output_path)
     # Синхронная очистка старых файлов — здесь мы уже в пуле потоков
@@ -1559,15 +1633,19 @@ async def start_custom_bybit_usdt(cb: CallbackQuery, state: FSMContext):
 
 @dp.message(CustomExchangeUSDT.username)
 async def cusdt_username(msg: Message, state: FSMContext):
-    await state.update_data(username=msg.text.strip())
+    text = msg.text.strip()
+    if len(text) > 50:
+        await msg.answer("Имя слишком длинное (макс. 50 символов)")
+        return
+    await state.update_data(username=text)
     await safe_delete_message(msg)
     data = await state.get_data()
     last_id = data.get("custom_last_msg_id")
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\n📈 Выбери направление сделки:", reply_markup=side_kb)
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchangeUSDT.side)
@@ -1586,8 +1664,8 @@ async def cusdt_side(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try:
         await call.message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
     data = await state.get_data()
     new = await call.message.answer(f"{build_custom_summary(data)}\n🪙 Торговая пара (например BTCUSDT):")
     await state.update_data(custom_last_msg_id=new.message_id)
@@ -1603,8 +1681,8 @@ async def cusdt_symbol(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\nЦена входа (например 123456.12):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchangeUSDT.entry)
@@ -1622,8 +1700,8 @@ async def cusdt_entry(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\nЦена выхода (например 123456.12):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchangeUSDT.exit_price)
@@ -1641,8 +1719,8 @@ async def cusdt_exit(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\nПлечо (например 20):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchangeUSDT.leverage)
@@ -1650,6 +1728,14 @@ async def cusdt_exit(msg: Message, state: FSMContext):
 
 @dp.message(CustomExchangeUSDT.leverage)
 async def cusdt_leverage(msg: Message, state: FSMContext):
+    text = msg.text.strip().lower().replace("x", "")
+    try:
+        lev_val = float(text)
+        if lev_val < 1 or lev_val > 200:
+            raise ValueError
+    except (ValueError, AttributeError):
+        await msg.answer("Введите плечо от 1 до 200")
+        return
     await state.update_data(leverage=msg.text.strip())
     await safe_delete_message(msg)
     data = await state.get_data()
@@ -1657,8 +1743,8 @@ async def cusdt_leverage(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\nРазмер депозита в USD (например 1000):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchangeUSDT.deposit)
@@ -1676,8 +1762,8 @@ async def cusdt_finish(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
 
     entry = data["entry"]
     exit_price = data["exit"]
@@ -1706,22 +1792,30 @@ async def cusdt_finish(msg: Message, state: FSMContext):
     }
 
     loop = asyncio.get_event_loop()
-    path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_usdt_image, image_data)
-    await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+    try:
+        path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_usdt_image, image_data)
+        await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await msg.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
     await state.clear()
 
 
 @dp.message(CustomExchange.username)
 async def custom_username(msg: Message, state: FSMContext):
-    await state.update_data(username=msg.text.strip())
+    text = msg.text.strip()
+    if len(text) > 50:
+        await msg.answer("Имя слишком длинное (макс. 50 символов)")
+        return
+    await state.update_data(username=text)
     await safe_delete_message(msg)
     data = await state.get_data()
     last_id = data.get("custom_last_msg_id")
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(
         f"{build_custom_summary(data)}\n📈 Выбери направление сделки:", reply_markup=side_kb
     )
@@ -1741,8 +1835,8 @@ async def custom_side(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try:
         await call.message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
     data = await state.get_data()
     new = await call.message.answer(f"{build_custom_summary(data)}\n🪙 Торговая пара (например BTCUSDT):")
     await state.update_data(custom_last_msg_id=new.message_id)
@@ -1757,8 +1851,8 @@ async def custom_symbol(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\nЦена входа (например 123456.12):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.entry)
@@ -1775,8 +1869,8 @@ async def custom_entry(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\nЦена выхода (например 123456.12):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.exit_price)
@@ -1793,14 +1887,22 @@ async def custom_exit(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(f"{build_custom_summary(data)}\nПлечо (например 20):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.leverage)
 
 @dp.message(CustomExchange.leverage)
 async def custom_leverage(msg: Message, state: FSMContext):
+    text = msg.text.strip().lower().replace("x", "")
+    try:
+        lev_val = float(text)
+        if lev_val < 1 or lev_val > 200:
+            raise ValueError
+    except (ValueError, AttributeError):
+        await msg.answer("Введите плечо от 1 до 200")
+        return
     await state.update_data(leverage=msg.text.strip())
     await safe_delete_message(msg)
     data = await state.get_data()
@@ -1808,8 +1910,8 @@ async def custom_leverage(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer(
         f"{build_custom_summary(data)}\nВведите реферальный код (например D1BFA4):",
         reply_markup=skip_kb,
@@ -1823,8 +1925,8 @@ async def skip_referral(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try:
         await call.message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
     new = await call.message.answer("Введите дату и время (например 14/02 19:00):", reply_markup=skip_kb)
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.datetime_str)
@@ -1838,8 +1940,8 @@ async def custom_referral(msg: Message, state: FSMContext):
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
     new = await msg.answer("Введите дату и время (например 02/14 19:00):", reply_markup=skip_kb)
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.datetime_str)
@@ -1850,8 +1952,8 @@ async def skip_datetime(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try:
         await call.message.delete()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
     await custom_finish(call.message, state)
 
 @dp.message(CustomExchange.datetime_str)
@@ -1888,19 +1990,103 @@ async def custom_finish(msg: Message, state: FSMContext):
         image_data["leverage"] = data["leverage"]
         image_data["referral"] = data.get("referral", "")
         image_data["datetime_str"] = data.get("datetime_str", "")
-        path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bingx_image, image_data)
+        gen_func = generate_custom_bingx_image
     else:
         image_data["leverage"] = f"{leverage:.1f}x"
-        path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_image, image_data)
+        gen_func = generate_custom_bybit_image
 
     last_id = data.get("custom_last_msg_id")
     if last_id:
         try:
             await msg.bot.delete_message(msg.chat.id, last_id)
-        except Exception:
-            pass
-    await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+        except Exception as e:
+            logger.debug(f"Non-critical error: {e}")
+    try:
+        path = await loop.run_in_executor(_THREAD_POOL, gen_func, image_data)
+        await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        await msg.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
     await state.clear()
+
+# =====================================================
+# REFERRAL COMMANDS
+# =====================================================
+@dp.message(Command("referral"))
+async def cmd_referral(message: Message):
+    user_id = message.from_user.id
+    code = get_referral_code(user_id)
+    count, needed = get_referral_stats(user_id)
+    text = (
+        f"🎁 Твой реферальный код: `{code}`\n\n"
+        f"Приглашено: {count}/3\n"
+    )
+    if needed > 0:
+        text += f"Ещё {needed} приглашений = 7 дней бесплатно!\n"
+    else:
+        text += "✅ Награда получена!\n"
+    text += f"\nПоделись кодом с друзьями."
+    await message.answer(text, parse_mode="Markdown")
+
+@dp.message(Command("ref"))
+async def cmd_use_ref(message: Message):
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("Использование: /ref REF123456")
+        return
+    code = parts[1].strip().upper()
+    success, msg = use_referral(message.from_user.id, code)
+    await message.answer(f"{'✅' if success else '❌'} {msg}")
+
+# =====================================================
+# LANGUAGE TOGGLE
+# =====================================================
+@dp.message(Command("lang"))
+async def cmd_lang(message: Message):
+    current = get_lang(message.from_user.id)
+    new_lang = "en" if current == "ru" else "ru"
+    set_lang(message.from_user.id, new_lang)
+    if new_lang == "en":
+        await message.answer("🇬🇧 Language switched to English")
+    else:
+        await message.answer("🇷🇺 Язык переключён на Русский")
+
+# =====================================================
+# INLINE MODE
+# =====================================================
+@dp.inline_query()
+async def inline_pnl(query: InlineQuery):
+    """Inline mode: @bot BTCUSDT +150% 50x"""
+    text = query.query.strip()
+    if not text:
+        return
+    parts = text.split()
+    if len(parts) < 2:
+        return
+    symbol = parts[0].upper()
+    try:
+        pnl = float(parts[1].replace("%", "").replace("+", ""))
+    except ValueError:
+        return
+    leverage = 10
+    if len(parts) >= 3:
+        try:
+            leverage = int(parts[2].replace("x", "").replace("X", ""))
+        except ValueError:
+            pass
+    side = "long" if pnl >= 0 else "short"
+    result_text = f"📊 {symbol} | {'🟢 Лонг' if side == 'long' else '🔴 Шорт'} {leverage}x\n💰 ROI: {pnl:+.2f}%"
+    results = [
+        InlineQueryResultArticle(
+            id="1",
+            title=f"{symbol} {pnl:+.2f}% ({leverage}x)",
+            description=f"{'Лонг' if side == 'long' else 'Шорт'} | Нажми чтобы отправить",
+            input_message_content=InputTextMessageContent(
+                message_text=result_text,
+            ),
+        )
+    ]
+    await query.answer(results, cache_time=5)
 
 # =====================================================
 # ЗАПУСК
