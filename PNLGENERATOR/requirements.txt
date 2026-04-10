@@ -1,0 +1,6 @@
+aiogram
+Pillow
+python-dotenv
+aiohttp
+requests
+Cachetools
