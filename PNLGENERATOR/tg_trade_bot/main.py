@@ -981,11 +981,8 @@ def draw_side_badge(draw, x, y, text, color, exchange, fonts_cfg, cfg=None):
         draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=color)
         text_color = (255, 255, 255)
     else:
-        # Bybit: тёмный фон с цветной рамкой (из template.png: bg=(22,26,29))
-        draw.rounded_rectangle(
-            (x1, y1, x2, y2), radius=radius,
-            fill=(22, 26, 29), outline=color, width=2,
-        )
+        # Bybit: серый фон, цветной текст (зелёный/красный), без рамки
+        draw.rounded_rectangle((x1, y1, x2, y2), radius=radius, fill=(30, 33, 38))
         text_color = color
     text_offset_y = fonts_cfg.get("sizes", {}).get("badge_text_offset_y", 0) if exchange == "bingx" else 0
     draw.text(((x1 + x2) / 2, (y1 + y2) / 2 + text_offset_y), text, fill=text_color, font=font, anchor="mm")
@@ -1067,11 +1064,11 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         clear_by_layout(img, draw, layout, key)
 
     WHITE = (255, 255, 255)
-    # Цвета извлечены пиксельно из реальных шаблонов template.png
+    # Цвета из реальных скриншотов приложений
     if exchange == "bybit":
-        GREEN  = (0, 204, 110)     # зелёный PnL/badge (из template.png)
-        RED    = (255, 55, 84)     # красный badge/PnL (из template.png)
-        ORANGE = (255, 162, 56)    # оранжевый ликвидация (из template.png)
+        GREEN  = (0, 194, 108)     # зелёный PnL/badge (извлечён из template.png)
+        RED    = (220, 59, 90)     # красный badge/PnL — малиновый (извлечён из template.png)
+        ORANGE = (245, 157, 60)    # оранжевый ликвидация (извлечён из template.png)
     else:  # bingx
         GREEN  = (62, 146, 103)    # зелёный badge fill (из template.png)
         RED    = (218, 102, 97)    # красный PnL (из template.png)
@@ -1233,12 +1230,8 @@ def generate_custom_bybit_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
-    # ── Очищаем переменные зоны ──────────────────────────────
-    clear_keys = ["clear_entry", "clear_exit", "clear_pnl", "clear_leverage"]
-    for key in clear_keys:
-        if key in layout:
-            clear_by_layout(img, draw, layout, key)
-    draw = ImageDraw.Draw(img)
+    # Шаблоны screenshot_long/short.png чистые — очистка зон НЕ нужна
+    # (clear zones ломают декоративные элементы: ракету/кошелёк)
 
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
@@ -1334,12 +1327,7 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
-    # ── Очищаем переменные зоны ──────────────────────────────
-    clear_keys = ["clear_entry", "clear_exit", "clear_pnl", "clear_leverage"]
-    for key in clear_keys:
-        if key in layout:
-            clear_by_layout(img, draw, layout, key)
-    draw = ImageDraw.Draw(img)
+    # Шаблоны screenshot_long/short.png чистые — очистка зон НЕ нужна
 
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
