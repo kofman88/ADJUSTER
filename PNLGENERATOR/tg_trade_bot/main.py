@@ -1233,12 +1233,8 @@ def generate_custom_bybit_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
-    # ── Очищаем переменные зоны ──────────────────────────────
-    clear_keys = ["clear_entry", "clear_exit", "clear_pnl", "clear_leverage"]
-    for key in clear_keys:
-        if key in layout:
-            clear_by_layout(img, draw, layout, key)
-    draw = ImageDraw.Draw(img)
+    # Шаблоны screenshot_long/short.png чистые — очистка зон НЕ нужна
+    # (clear zones ломают декоративные элементы: ракету/кошелёк)
 
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
@@ -1334,12 +1330,7 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
-    # ── Очищаем переменные зоны ──────────────────────────────
-    clear_keys = ["clear_entry", "clear_exit", "clear_pnl", "clear_leverage"]
-    for key in clear_keys:
-        if key in layout:
-            clear_by_layout(img, draw, layout, key)
-    draw = ImageDraw.Draw(img)
+    # Шаблоны screenshot_long/short.png чистые — очистка зон НЕ нужна
 
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
