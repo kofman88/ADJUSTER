@@ -23,7 +23,7 @@ FONTS = {
             "badge": "fonts/SF_Pro_Display_Regular.otf",  # match user's reference (medium weight)
         },
         "sizes": {
-            "symbol": 54,
+            "symbol": 70,
             "pnl": 54,
             "leverage": 40,
             "qty": 52,
