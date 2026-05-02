@@ -1151,7 +1151,309 @@ def draw_bingx_icon(
     img.paste(icon, (x, y), icon)
 
 
+def generate_bingx_trade_card(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
+    """BingX position card rendered from scratch on a black 1290x810 canvas to
+    pixel-match the BingX mobile position view. Replaces the generic
+    template-based renderer for bingx."""
+    output_dir = os.path.join(BASE_DIR, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"result_{uuid.uuid4().hex[:8]}.png")
+
+    W, H = 1290, 810
+    img = Image.new("RGB", (W, H), (0, 0, 0))
+    draw = ImageDraw.Draw(img)
+
+    fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
+    fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
+
+    f_symbol     = _load_font(fp_b, 56)
+    f_badge      = _load_font(fp_b, 42)
+    f_label      = _load_font(fp_r, 38)
+    f_value      = _load_font(fp_b, 56)
+    f_pnl_top    = _load_font(fp_b, 64)   # "-66.5999"
+    f_pnl_pct    = _load_font(fp_r, 44)   # "(-3.88%)"
+    f_top_label  = _load_font(fp_r, 38)   # "Нереализованная П/У(USDT)"
+    f_btn        = _load_font(fp_r, 38)
+    f_tpsl       = _load_font(fp_r, 38)
+    f_realized   = _load_font(fp_r, 38)
+    f_realized_v = _load_font(fp_r, 38)
+
+    WHITE  = (255, 255, 255)
+    GRAY   = (138, 144, 158)
+    GRAY_D = (90, 95, 105)        # dotted underline
+    GREEN  = (44, 196, 134)
+    RED    = (245, 80, 95)
+    BTN_BG = (28, 28, 31)
+    BADGE_DARK = (38, 38, 42)
+    BADGE_PINK = (255, 110, 130)
+    BADGE_GREEN= (44, 196, 134)
+
+    side = data["side"]
+    is_long = side == "long"
+    side_badge_color = BADGE_GREEN if is_long else BADGE_PINK
+
+    # ----- Common numeric values (computed up-front; used by multiple sections) -----
+    margin_val = float(data.get("amount") or 0)
+    lev_int = int(float(str(data["leverage"]).replace("x", "")))
+    entry_val = float(data.get("entry") or 0)
+    mark_val  = float(data.get("mark") or 0)
+    # Use full-precision qty (no rounding) so PnL displays like BingX UI: -66.5999
+    qty_unrounded = (margin_val * lev_int / entry_val) if entry_val > 0 else 0.0
+    raw_pnl_usdt = (qty_unrounded * (mark_val - entry_val)) if is_long else (qty_unrounded * (entry_val - mark_val))
+    pnl_color = GREEN if raw_pnl_usdt >= 0 else RED
+    # Position (USDT) = qty × current mark price (current notional)
+    position_usdt = qty_unrounded * mark_val if mark_val else qty_unrounded * entry_val
+
+    PAD_L = 40
+    PAD_R = 40
+    RIGHT = W - PAD_R
+
+    # ============ TOP ROW: symbol + candle icon  /  P/L label + refresh ============
+    sym_y = 78
+    symbol = data["symbol"].upper()
+    draw.text((PAD_L, sym_y), symbol, fill=WHITE, font=f_symbol, anchor="lm")
+    sym_w = draw.textlength(symbol, font=f_symbol)
+
+    # Dual candle icon (two thin vertical candles with wicks) — to the right of symbol
+    icon_cx = PAD_L + sym_w + 28
+    icon_cy = sym_y
+    # candle 1: small body up
+    draw.rectangle([icon_cx-1, icon_cy-22, icon_cx+1, icon_cy+22], fill=GRAY)
+    draw.rectangle([icon_cx-9, icon_cy-12, icon_cx+9, icon_cy+8], outline=GRAY, width=2)
+    # candle 2: offset to right
+    icon_cx2 = icon_cx + 24
+    draw.rectangle([icon_cx2-1, icon_cy-22, icon_cx2+1, icon_cy+22], fill=GRAY)
+    draw.rectangle([icon_cx2-9, icon_cy-8, icon_cx2+9, icon_cy+12], outline=GRAY, width=2)
+
+    # Top-right: "Нереализованная П/У(USDT)" gray with dotted underline + refresh icon
+    refresh_size = 28
+    refresh_cx = RIGHT - refresh_size // 2
+    refresh_cy = sym_y
+    # Refresh circular arrow (open ring with arrow tip)
+    draw.arc([refresh_cx-14, refresh_cy-14, refresh_cx+14, refresh_cy+14],
+             start=30, end=320, fill=GRAY, width=3)
+    # Arrow tip on the open end (top-right)
+    import math as _m
+    a = _m.radians(30)
+    tip = (refresh_cx + 14*_m.cos(a), refresh_cy + 14*_m.sin(a))
+    draw.polygon([
+        (tip[0]+0, tip[1]-8),
+        (tip[0]+10, tip[1]+1),
+        (tip[0]-2, tip[1]+8),
+    ], fill=GRAY)
+
+    top_label = "Нереализованная П/У(USDT)"
+    label_x = refresh_cx - 14 - 18
+    draw.text((label_x, sym_y), top_label, fill=GRAY, font=f_top_label, anchor="rm")
+    lbl_w = draw.textlength(top_label, font=f_top_label)
+    # dotted underline
+    _draw_dotted(draw, label_x - lbl_w, sym_y + 24, label_x, sym_y + 24, GRAY_D, dot=2, gap=4)
+
+    # ============ BADGE ROW + BIG PNL ============
+    badge_y = 168
+    bx = PAD_L
+    # Side pill
+    bx = _draw_pill(draw, bx, badge_y, "Шорт" if not is_long else "Лонг", f_badge,
+                    fill=side_badge_color, text_color=(20, 22, 26) if is_long else WHITE,
+                    pad_x=22, pad_y=10, radius=14)
+    bx += 14
+    bx = _draw_pill(draw, bx, badge_y, "Кросс", f_badge,
+                    fill=BADGE_DARK, text_color=WHITE,
+                    pad_x=22, pad_y=10, radius=14)
+    bx += 14
+    lev_int = int(float(str(data["leverage"]).replace("x", "")))
+    bx = _draw_pill(draw, bx, badge_y, f"{lev_int}X", f_badge,
+                    fill=BADGE_DARK, text_color=WHITE,
+                    pad_x=22, pad_y=10, radius=14)
+
+    # Big PnL on right side of same row
+    raw_pct = (raw_pnl_usdt / margin_val * 100) if margin_val > 0 else 0.0
+    pnl_value_text = f"{raw_pnl_usdt:+.4f}"
+    pnl_pct_text   = f"({raw_pct:+.2f}%)"
+    # Right-anchor: pct first, then value before it
+    pct_w = draw.textlength(pnl_pct_text, font=f_pnl_pct)
+    pct_x = RIGHT
+    draw.text((pct_x, badge_y), pnl_pct_text, fill=pnl_color, font=f_pnl_pct, anchor="rm")
+    val_x = pct_x - pct_w - 14
+    draw.text((val_x, badge_y), pnl_value_text, fill=pnl_color, font=f_pnl_top, anchor="rm")
+
+    # ============ ROW A LABELS: Позиция / Маржа / Риск ============
+    col_x = [PAD_L, 580, RIGHT]   # left/mid/right anchors
+    col_anchor = ["lm", "lm", "rm"]
+    rowA_lbl_y = 280
+    rowA_val_y = 350
+
+    rowA_labels = ["Позиция (USDT)", "Маржа(USDT)", "Риск"]
+    for i, lbl in enumerate(rowA_labels):
+        anchor = col_anchor[i]
+        x = col_x[i]
+        draw.text((x, rowA_lbl_y), lbl, fill=GRAY, font=f_label, anchor=anchor)
+        lw = draw.textlength(lbl, font=f_label)
+        # dotted underline under label
+        if anchor == "rm":
+            x0 = x - lw; x1 = x
+        else:
+            x0 = x; x1 = x + lw
+        _draw_dotted(draw, x0, rowA_lbl_y + 26, x1, rowA_lbl_y + 26, GRAY_D, dot=2, gap=4)
+
+    # Values for row A
+    # Margin Ratio (Риск) ≈ maintenance_margin / (margin + unrealized_pnl) × 100.
+    # BingX maintenance margin tier ≈ 0.4% of position notional for major coins.
+    mm_rate = 0.004
+    maint_margin = position_usdt * mm_rate
+    margin_balance = margin_val + raw_pnl_usdt
+    risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
+
+    pos_text = format_position_usdt(position_usdt)
+    mar_text = f"{margin_val:,.4f}"
+    risk_text = f"{risk_val:.2f}%" if risk_val > 0 else "--"
+
+    draw.text((col_x[0], rowA_val_y), pos_text, fill=WHITE, font=f_value, anchor="lm")
+    draw.text((col_x[1], rowA_val_y), mar_text, fill=WHITE, font=f_value, anchor="lm")
+    draw.text((col_x[2], rowA_val_y), risk_text, fill=GREEN, font=f_value, anchor="rm")
+
+    # ============ ROW B LABELS: Цена входа / Маркировка / Ожид. цена ликвид. ============
+    rowB_lbl_y = 440
+    rowB_val_y = 510
+    rowB_labels = ["Цена входа", "Маркировка", "Ожид. цена ликвид."]
+    for i, lbl in enumerate(rowB_labels):
+        anchor = col_anchor[i]
+        x = col_x[i]
+        draw.text((x, rowB_lbl_y), lbl, fill=GRAY, font=f_label, anchor=anchor)
+        lw = draw.textlength(lbl, font=f_label)
+        if anchor == "rm":
+            x0 = x - lw; x1 = x
+        else:
+            x0 = x; x1 = x + lw
+        _draw_dotted(draw, x0, rowB_lbl_y + 26, x1, rowB_lbl_y + 26, GRAY_D, dot=2, gap=4)
+
+    precision = data.get("price_precision")
+    entry_text = format_price(entry_val, precision)
+    mark_text  = format_price(mark_val,  precision)
+    liq_val    = float(data.get("liquidation") or 0)
+    liq_text   = format_price(liq_val, precision) if liq_val > 0 else "0"
+
+    draw.text((col_x[0], rowB_val_y), entry_text, fill=WHITE, font=f_value, anchor="lm")
+    draw.text((col_x[1], rowB_val_y), mark_text,  fill=WHITE, font=f_value, anchor="lm")
+    # Liquidation: green when far from entry (safe), red when close
+    liq_safety = abs(liq_val - entry_val) / entry_val if entry_val > 0 else 0
+    liq_color = GREEN if liq_safety > 0.05 else RED
+    draw.text((col_x[2], rowB_val_y), liq_text, fill=liq_color, font=f_value, anchor="rm")
+
+    # ============ Т-п/с-л + "Вся позиция: X/--" row ============
+    tp_y = 600
+    draw.text((PAD_L, tp_y), "Т-п/с-л", fill=GRAY, font=f_tpsl, anchor="lm")
+
+    # Right side: "Вся позиция: <green>/--"
+    label = "Вся позиция: "
+    x_cursor = RIGHT - 30  # leave room for chevron
+    chev = "›"
+    draw.text((RIGHT, tp_y), chev, fill=GRAY, font=f_tpsl, anchor="rm")
+    chev_w = draw.textlength(chev, font=f_tpsl)
+    x_cursor = RIGHT - chev_w - 10
+    # right-aligned compose: dash, slash, value, label
+    dash_text = "--"
+    dash_w = draw.textlength(dash_text, font=f_tpsl)
+    draw.text((x_cursor, tp_y), dash_text, fill=RED, font=f_tpsl, anchor="rm")
+    x_cursor -= dash_w
+    slash_text = "/"
+    slash_w = draw.textlength(slash_text, font=f_tpsl)
+    draw.text((x_cursor, tp_y), slash_text, fill=GRAY, font=f_tpsl, anchor="rm")
+    x_cursor -= slash_w
+    # green TP value: roughly 25-30% of position move worth — show "--"
+    tp_val_text = "--"
+    tpv_w = draw.textlength(tp_val_text, font=f_tpsl)
+    draw.text((x_cursor, tp_y), tp_val_text, fill=GREEN, font=f_tpsl, anchor="rm")
+    x_cursor -= tpv_w
+    label_w = draw.textlength(label, font=f_tpsl)
+    draw.text((x_cursor, tp_y), label, fill=GRAY, font=f_tpsl, anchor="rm")
+
+    # ============ Реализованная П/У (USDT) + value ============
+    rl_y = 670
+    rl_label = "Реализованная П/У (USDT)"
+    draw.text((PAD_L, rl_y), rl_label, fill=GRAY, font=f_realized, anchor="lm")
+    rl_lw = draw.textlength(rl_label, font=f_realized)
+    _draw_dotted(draw, PAD_L, rl_y + 26, PAD_L + rl_lw, rl_y + 26, GRAY_D, dot=2, gap=4)
+    # Realized PnL value: 0 by default unless user provided one
+    realized_val = float(data.get("realized_pnl") or 0)
+    rl_val_text = f"{realized_val:+.4f}" if realized_val != 0 else "0"
+    rl_color = GREEN if realized_val >= 0 else RED
+    draw.text((RIGHT, rl_y), rl_val_text, fill=rl_color, font=f_realized_v, anchor="rm")
+
+    # ============ BUTTONS ROW ============
+    btn_y = 745
+    btn_h = 60
+    gap = 16
+    last_btn_w = 80  # square button on far right
+    avail_w = W - PAD_L - PAD_R - 3 * gap - last_btn_w
+    btn_w = avail_w // 3
+    bxs = PAD_L
+    for label in ("Настроить т-п/с-л", "Закрыть", "Быстрое закрытие"):
+        _draw_button(draw, bxs, btn_y, btn_w, btn_h, label, f_btn, BTN_BG, WHITE)
+        bxs += btn_w + gap
+    # Last square: arrow icon (up/down toggle)
+    _draw_button(draw, bxs, btn_y, last_btn_w, btn_h, "", f_btn, BTN_BG, WHITE)
+    # Up-down arrow inside
+    cx_b = bxs + last_btn_w // 2
+    cy_b = btn_y + btn_h // 2
+    draw.polygon([(cx_b-10, cy_b-2), (cx_b+0, cy_b-14), (cx_b+10, cy_b-2)], fill=WHITE)
+    draw.polygon([(cx_b-10, cy_b+2), (cx_b+0, cy_b+14), (cx_b+10, cy_b+2)], fill=WHITE)
+
+    # Watermark (subtle, bottom-right corner)
+    if data.get("telegram_username"):
+        wm_font = _load_font(fp_r, 18)
+        draw.text((W - 10, H - 6), f"@{data['telegram_username']}",
+                  fill=(60, 60, 65), font=wm_font, anchor="rb")
+
+    img.save(output_path)
+    _cleanup_old_files(os.path.dirname(output_path), "result_")
+    return output_path
+
+
+def format_position_usdt(value: float) -> str:
+    """Position USDT in BingX style: keeps non-zero trailing decimals up to 2 places.
+
+    Examples: 8632.94 → '8,632.94', 5006.8 → '5,006.8', 0 → '0'.
+    """
+    if value == 0:
+        return "0"
+    return f"{value:,.2f}".rstrip("0").rstrip(".") or "0"
+
+
+def _draw_pill(draw, x, y, text, font, *, fill, text_color, pad_x, pad_y, radius):
+    """Draw a rounded-rect pill anchored at the LEFT edge with vertical center y. Returns the right edge x."""
+    tw = draw.textlength(text, font=font)
+    th_top, th_bot = font.getmetrics()
+    th = th_top + th_bot
+    box_w = int(tw + pad_x * 2)
+    box_h = int(th + pad_y * 2)
+    x0 = x; y0 = y - box_h // 2
+    x1 = x + box_w; y1 = y0 + box_h
+    draw.rounded_rectangle([x0, y0, x1, y1], radius=radius, fill=fill)
+    draw.text((x0 + box_w // 2, y), text, fill=text_color, font=font, anchor="mm")
+    return x1
+
+
+def _draw_button(draw, x, y, w, h, text, font, bg, fg):
+    draw.rounded_rectangle([x, y, x + w, y + h], radius=8, fill=bg)
+    if text:
+        draw.text((x + w // 2, y + h // 2), text, fill=fg, font=font, anchor="mm")
+
+
+def _draw_dotted(draw, x0, y0, x1, y1, color, *, dot=2, gap=3):
+    """Draw a horizontal dotted line from (x0,y0) to (x1,y1)."""
+    if y0 != y1:
+        return
+    x = int(x0)
+    end = int(x1)
+    while x < end:
+        draw.rectangle([x, y0, min(x + dot, end), y0 + 1], fill=color)
+        x += dot + gap
+
+
 def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
+    if data.get("exchange") == "bingx":
+        return generate_bingx_trade_card(data, percent, pnl, pnl_usdt)
     exchange = data["exchange"]
     template_path = os.path.join(BASE_DIR, "assets", exchange, "template.png")
     output_dir = os.path.join(BASE_DIR, "output")
