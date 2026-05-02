@@ -25,7 +25,6 @@ Pixel-perfect PnL share-card generator for Bybit and BingX.
 
 import io
 import os
-import math
 import functools
 from typing import Literal
 
@@ -696,7 +695,6 @@ def _generate_bingx_card(
     GRAY        = cfg["gray"]
     DIV_COL     = cfg["divider_color"]
     is_long     = direction == "LONG"
-    dir_color   = cfg["long_color"]   if is_long else cfg["short_color"]
     badge_bg    = cfg["long_badge_bg"] if is_long else cfg["short_badge_bg"]
     pnl_color   = cfg["profit_color"]  if roi_percent >= 0 else cfg["loss_color"]
     dir_ru      = "Лонг" if is_long else "Шорт"

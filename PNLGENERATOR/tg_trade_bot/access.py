@@ -2,8 +2,14 @@ import json
 import os
 from datetime import datetime, timedelta
 
-ACCESS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "access.json")
-REFERRAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "referrals.json")
+# DATA_DIR is the directory where access.json and referrals.json are persisted.
+# In production this is mounted as a Docker volume (see docker-compose.yml) so the
+# files survive container restarts. Defaults to the module directory for local dev.
+DATA_DIR = os.getenv("DATA_DIR", os.path.dirname(os.path.abspath(__file__)))
+os.makedirs(DATA_DIR, exist_ok=True)
+
+ACCESS_FILE = os.path.join(DATA_DIR, "access.json")
+REFERRAL_FILE = os.path.join(DATA_DIR, "referrals.json")
 
 TRIAL_DAYS = 2
 FULL_DAYS = 30
@@ -150,7 +156,7 @@ def use_referral(user_id: int, referral_code: str) -> tuple[bool, str]:
         grant_access(referrer_id, days=7)
         refs[str(referrer_id)]["rewarded"] = True
         _save_referrals(refs)
-        return True, f"Код применён! Пригласивший получил 7 дней доступа."
+        return True, "Код применён! Пригласивший получил 7 дней доступа."
     _save_referrals(refs)
     return True, "Код применён! Спасибо."
 

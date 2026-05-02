@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 from cachetools import TTLCache
 import aiohttp
 from access import activate_trial, grant_access, revoke_access, check_access, days_left, check_daily_limit, increment_usage, get_referral_code, get_referral_stats, use_referral
-from i18n import t, get_lang, set_lang
+from i18n import get_lang, set_lang
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "445677777"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "@kofman88")
@@ -1186,13 +1186,8 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    # Per-template y offset (LONG sits ~15px higher) and candle-icon left edge
-    if is_long:
-        YOFF = -15
-        candle_icon_x = 370   # candle icon starts here on LONG (after GIGGLEUSDT)
-    else:
-        YOFF = 0
-        candle_icon_x = 290   # candle icon starts here on SHORT (after ETHUSDT)
+    # Per-template y offset (LONG sits ~15px higher)
+    YOFF = -15 if is_long else 0
 
     def wipe(x1, y1, x2, y2):
         draw.rectangle([x1, y1, x2, y2], fill=BG)
@@ -1254,7 +1249,9 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     entry_v  = float(data.get("entry") or 0)
     mark_v   = float(data.get("mark") or 0)
     qty_u = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
-    position_usdt = qty_u * (mark_v if mark_v else entry_v)
+    auto_position = qty_u * (mark_v if mark_v else entry_v)
+    # Optional override so the user can dictate exact values shown on the card.
+    position_usdt = float(data["position_usdt"]) if data.get("position_usdt") is not None else auto_position
 
     # ---- 4. Row A values: Position USDT / Margin / Risk ----
     val_font = _load_font(fp_r, 38)
@@ -1265,11 +1262,14 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     wipe(1080, rowA_y - 22, 1250, rowA_y + 22)  # Risk
     pos_text = f"{position_usdt:,.2f}".rstrip("0").rstrip(".") or "0"
     mar_text = f"{margin_v:,.4f}"
-    # Risk: maintenance margin / margin balance × 100  (bingx-style approx)
-    mm_rate = 0.004
-    maint_margin = position_usdt * mm_rate
-    margin_balance = margin_v + pnl_usdt
-    risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
+    # Risk: prefer explicit override; otherwise approximate maintenance/balance ratio.
+    if data.get("risk_pct") is not None:
+        risk_val = float(data["risk_pct"])
+    else:
+        mm_rate = 0.004
+        maint_margin = position_usdt * mm_rate
+        margin_balance = margin_v + pnl_usdt
+        risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
     risk_text = f"{risk_val:.2f}%" if risk_val > 0 else "--"
     risk_color = GREEN if 0 < risk_val < 50 else (RED if risk_val >= 70 else GREEN)
 
@@ -1289,23 +1289,25 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     draw.text((1235, rowB_y), format_price(liq_v) if liq_v > 0 else "0",
               fill=liq_color, font=val_font, anchor="rm")
 
-    # ---- "Вся позиция: VALUE/--" — wipe the right side and rewrite as --/-- ----
-    # SHORT template "Вся" starts at x=793, LONG at x=837 — wipe from x=780 to be safe
+    # ---- "Вся позиция: TP/SL" — overridable via data["tp_value"] / data["sl_value"] ----
     tpsl_y = 540 + YOFF
     wipe(780, tpsl_y - 22, 1245, tpsl_y + 22)
     tpsl_font = _load_font(fp_r, 32)
+    tp_value = str(data.get("tp_value") or "--")
+    sl_value = str(data.get("sl_value") or "--")
     chev = "›"
     chev_w = draw.textlength(chev, font=tpsl_font)
     draw.text((1235, tpsl_y), chev, fill=GREY, font=tpsl_font, anchor="rm")
     cursor = 1235 - chev_w - 10
-    dash_w = draw.textlength("--", font=tpsl_font)
-    draw.text((cursor, tpsl_y), "--", fill=RED, font=tpsl_font, anchor="rm")
-    cursor -= dash_w + 4
+    sl_w = draw.textlength(sl_value, font=tpsl_font)
+    draw.text((cursor, tpsl_y), sl_value, fill=RED, font=tpsl_font, anchor="rm")
+    cursor -= sl_w + 4
     slash_w = draw.textlength("/", font=tpsl_font)
     draw.text((cursor, tpsl_y), "/", fill=GREY, font=tpsl_font, anchor="rm")
     cursor -= slash_w + 4
-    draw.text((cursor, tpsl_y), "--", fill=GREEN, font=tpsl_font, anchor="rm")
-    cursor -= dash_w + 8
+    tp_w = draw.textlength(tp_value, font=tpsl_font)
+    draw.text((cursor, tpsl_y), tp_value, fill=GREEN, font=tpsl_font, anchor="rm")
+    cursor -= tp_w + 8
     label = "Вся позиция: "
     draw.text((cursor, tpsl_y), label, fill=GREY, font=tpsl_font, anchor="rm")
 
@@ -1922,16 +1924,16 @@ def generate_custom_bingx_image(data: dict) -> str:
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    # Font sizes calibrated to user's 1800x1800 reference cards
-    f_header   = _load_font(fp_b, 80)    # "Нереализованная П/У"
-    f_meta     = _load_font(fp_b, 92)    # "ETHUSDT │ Шорт │ 5X"
-    f_pnl      = _load_font(fp_b, 280)   # "-4.07%"
-    f_label    = _load_font(fp_r, 56)    # "Последняя цена" / "Цена входа"
-    f_value    = _load_font(fp_b, 56)    # numeric values
-    f_username = _load_font(fp_b, 60)    # CHM_LAB
-    f_date     = _load_font(fp_r, 50)    # "05-02"
-    f_ref_lbl  = _load_font(fp_r, 56)    # "Реферальный код"
-    f_ref_code = _load_font(fp_b, 56)    # "D1BFA4"
+    # Font sizes calibrated to text bounding boxes measured in BINGX_Custom_*.JPG
+    f_header   = _load_font(fp_b, 64)    # ref h=57
+    f_meta     = _load_font(fp_b, 80)    # ref h=58
+    f_pnl      = _load_font(fp_b, 215)   # ref h=156
+    f_label    = _load_font(fp_r, 50)    # ref h=45
+    f_value    = _load_font(fp_b, 56)    # ref h=45 (value slightly bolder than label)
+    f_username = _load_font(fp_b, 56)    # ref h=49
+    f_date     = _load_font(fp_r, 50)    # ref h=44
+    f_ref_lbl  = _load_font(fp_r, 50)    # ref h=45
+    f_ref_code = _load_font(fp_b, 56)    # ref h=43
 
     WHITE = (255, 255, 255)
     GREEN = (0, 200, 122)
@@ -1943,74 +1945,87 @@ def generate_custom_bingx_image(data: dict) -> str:
     side_color = GREEN if side == "long" else RED
     side_text  = "Лонг" if side == "long" else "Шорт"
 
+    # Pixel-anchor map measured from BINGX_Custom_*.JPG references (1800x1800).
+    # HEADER_Y is biased -5 because PIL's "lm" anchor at f_header=64 sits ~5px below
+    # visual cap-height center; other fonts/sizes empirically align without bias.
+    LEFT_X         = 98     # all left-aligned texts share this x
+    HEADER_Y       = 499    # "Реализованная / Нереализованная П/У" (ref center 504)
+    META_Y         = 642    # "SYMBOL │ Side │ Lev"
+    PNL_Y          = 876    # big "+224.11%"
+    PRICE_TOP_Y    = 1093   # "Цена закрытия / Последняя цена"
+    PRICE_BOT_Y    = 1204   # "Цена входа"
+    VALUE_GAP      = 65     # px between label end and value start
+    USER_X         = 281    # "CHM_LAB" / "05-02" left edge (right of triangle)
+    USER_Y         = 1591   # "CHM_LAB" center
+    DATE_Y         = 1677   # "05-02" center
+    REF_RIGHT_X    = 1519   # right edge of "Реферальный код" / "D1BFA4"
+    REF_LBL_Y      = 1584
+    REF_CODE_Y     = 1668
+
     # ----- Header: "Нереализованная / Реализованная П/У" (top-left) -----
     header_text = "Реализованная П/У" if data.get("status") == "closed" else "Нереализованная П/У"
-    draw.text((130, 480), header_text, fill=WHITE, font=f_header, anchor="lm")
+    draw.text((LEFT_X, HEADER_Y), header_text, fill=WHITE, font=f_header, anchor="lm")
 
     # ----- Symbol │ Side │ Leverage row -----
     symbol  = str(data.get("symbol", "")).upper()
     lev_raw = str(data.get("leverage", "")).strip().lower().replace("x", "")
     lev_text = f"{lev_raw}X" if lev_raw else ""
 
-    meta_y = 660
-    x = 130
     sep_gap = 40            # space on each side of separator
     sep_h = 70              # vertical line height
     sep_thick = 3           # line thickness
 
     def draw_sep(cx: int):
         draw.rectangle(
-            [cx - sep_thick // 2, meta_y - sep_h // 2, cx + sep_thick // 2 + sep_thick % 2, meta_y + sep_h // 2],
+            [cx - sep_thick // 2, META_Y - sep_h // 2, cx + sep_thick // 2 + sep_thick % 2, META_Y + sep_h // 2],
             fill=SEP,
         )
 
-    # Symbol
-    draw.text((x, meta_y), symbol, fill=WHITE, font=f_meta, anchor="lm")
+    x = LEFT_X
+    draw.text((x, META_Y), symbol, fill=WHITE, font=f_meta, anchor="lm")
     x += draw.textlength(symbol, font=f_meta) + sep_gap
     draw_sep(x); x += sep_gap
-    # Side (colored)
-    draw.text((x, meta_y), side_text, fill=side_color, font=f_meta, anchor="lm")
+    draw.text((x, META_Y), side_text, fill=side_color, font=f_meta, anchor="lm")
     x += draw.textlength(side_text, font=f_meta) + sep_gap
     draw_sep(x); x += sep_gap
-    # Leverage
     if lev_text:
-        draw.text((x, meta_y), lev_text, fill=WHITE, font=f_meta, anchor="lm")
+        draw.text((x, META_Y), lev_text, fill=WHITE, font=f_meta, anchor="lm")
 
     # ----- Huge PnL -----
     pnl_color = GREEN if pnl >= 0 else RED
     pnl_text  = f"{pnl:+.2f}%"
-    draw.text((125, 920), pnl_text, fill=pnl_color, font=f_pnl, anchor="lm")
+    draw.text((LEFT_X, PNL_Y), pnl_text, fill=pnl_color, font=f_pnl, anchor="lm")
 
     # ----- Price rows: "Последняя цена / Цена закрытия" + "Цена входа" -----
     label_top = "Последняя цена" if data.get("status", "open") != "closed" else "Цена закрытия"
-    last_price_y  = 1240
-    entry_price_y = 1340
+    label_bot = "Цена входа"
 
-    # Labels (gray) — left aligned
-    draw.text((140, last_price_y),  label_top,    fill=GRAY, font=f_label, anchor="lm")
-    draw.text((140, entry_price_y), "Цена входа", fill=GRAY, font=f_label, anchor="lm")
-
-    # Values (white, bold) — aligned at fixed x. BingX style: no thousands separator.
+    # BingX style: no thousands separator.
     def _fmt(v):
         return format_price(v).replace(",", "")
-    val_x = 720
-    draw.text((val_x, last_price_y),  _fmt(data.get("exit",  0)), fill=WHITE, font=f_value, anchor="lm")
-    draw.text((val_x, entry_price_y), _fmt(data.get("entry", 0)), fill=WHITE, font=f_value, anchor="lm")
+
+    # Draw labels (gray, left-aligned) and values (white, bold, with VALUE_GAP after label).
+    draw.text((LEFT_X, PRICE_TOP_Y), label_top, fill=GRAY, font=f_label, anchor="lm")
+    val_top_x = LEFT_X + int(draw.textlength(label_top, font=f_label)) + VALUE_GAP
+    draw.text((val_top_x, PRICE_TOP_Y), _fmt(data.get("exit", 0)), fill=WHITE, font=f_value, anchor="lm")
+
+    draw.text((LEFT_X, PRICE_BOT_Y), label_bot, fill=GRAY, font=f_label, anchor="lm")
+    val_bot_x = LEFT_X + int(draw.textlength(label_bot, font=f_label)) + VALUE_GAP
+    draw.text((val_bot_x, PRICE_BOT_Y), _fmt(data.get("entry", 0)), fill=WHITE, font=f_value, anchor="lm")
 
     # ----- Username + date (under triangle on bottom-left) -----
     username = str(data.get("username", "")).strip()
     datetime_text = str(data.get("datetime_str", "")).strip()
     if username:
-        draw.text((290, 1655), username, fill=WHITE, font=f_username, anchor="lm")
+        draw.text((USER_X, USER_Y), username, fill=WHITE, font=f_username, anchor="lm")
     if datetime_text:
-        draw.text((290, 1720), datetime_text, fill=GRAY, font=f_date, anchor="lm")
+        draw.text((USER_X, DATE_Y), datetime_text, fill=GRAY, font=f_date, anchor="lm")
 
     # ----- Referral label + code (bottom-right, left of QR) -----
     referral_code = str(data.get("referral", "")).strip()
-    # QR sits at x≈1560-1705. Anchor referral text right-aligned at x=1530.
-    draw.text((1530, 1580), "Реферальный код", fill=GRAY, font=f_ref_lbl, anchor="rm")
+    draw.text((REF_RIGHT_X, REF_LBL_Y), "Реферальный код", fill=GRAY, font=f_ref_lbl, anchor="rm")
     if referral_code:
-        draw.text((1530, 1660), referral_code, fill=WHITE, font=f_ref_code, anchor="rm")
+        draw.text((REF_RIGHT_X, REF_CODE_Y), referral_code, fill=WHITE, font=f_ref_code, anchor="rm")
 
     img.save(output_path)
     _cleanup_old_files(os.path.dirname(output_path), "custom_bingx_")
@@ -2516,7 +2531,7 @@ async def cmd_referral(message: Message):
         text += f"Ещё {needed} приглашений = 7 дней бесплатно!\n"
     else:
         text += "✅ Награда получена!\n"
-    text += f"\nПоделись кодом с друзьями."
+    text += "\nПоделись кодом с друзьями."
     await message.answer(text, parse_mode="Markdown")
 
 @dp.message(Command("ref"))
