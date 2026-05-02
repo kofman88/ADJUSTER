@@ -27,9 +27,11 @@ LAYOUT = {
 
     "bingx": {
         # --- Обычный скрин ---
-        "symbol":    {"x": 0.055, "y": 0.12, "anchor": "lm", "dx": 0, "dy": 0},
+        "symbol":    {"x": 0.065, "y": 0.115, "anchor": "lm", "dx": 0, "dy": 0},
         "leverage":  {"x": 0.30,  "y": 0.20, "anchor": "lm"},
-        "side_badge":{"x": 0.10,  "y": 0.202, "anchor": "lm", "dx": 0, "dy": 0, "w": 150, "h": 70, "radius": 14},
+        # Side pill: x is the CENTER. Left edge of the pill aligned with the
+        # symbol left edge so the symbol sits directly above it.
+        "side_badge":{"x": 0.130,  "y": 0.202, "anchor": "lm", "dx": 0, "dy": 0, "w": 150, "h": 70, "radius": 18},
         "pnl":       {"x": 0.98,  "y": 0.20, "anchor": "rm", "dx": 0, "dy": 0},
 
         # Иконка монеты
@@ -53,14 +55,15 @@ LAYOUT = {
             "anchor": "rm",
         },
 
-        # Серые боксы Кросс / 20x (Semibold: Кросс tw=164 pad_x=3→170px; 50X tw=108 pad_x=7→122px)
+        # Pills: Кросс/NX with comfy padding so they read as clearly grey-filled
+        # capsules (matching the new BingX UI references).
         "margin_mode": {
-            "x": 0.22, "y": 0.202,
-            "pad_x": 3, "pad_y": 9, "min_h": 70, "radius": 14,
+            "x": 0.270, "y": 0.202,
+            "pad_x": 16, "pad_y": 10, "min_h": 64, "min_w": 150, "radius": 16,
         },
         "leverage_bingx": {
-            "x": 0.33, "y": 0.202,
-            "pad_x": 7, "pad_y": 9, "min_h": 70, "radius": 14,
+            "x": 0.388, "y": 0.202,
+            "pad_x": 16, "pad_y": 10, "min_h": 64, "min_w": 100, "radius": 16,
         },
 
         # Очистка
@@ -111,31 +114,38 @@ LAYOUT = {
 
 BYBIT_CUSTOM_LAYOUT = {
     "bybit": {
-        "username":  {"x": 0.12,  "y": 0.16, "anchor": "lm"},
-        "symbol":    {"x": 0.06,  "y": 0.24, "anchor": "lm"},
+        # Username + avatar (top-left, just under BYBIT logo)
+        "username":  {"x": 0.155, "y": 0.165, "anchor": "lm"},
         "symbol_icon": {
-            "x": 0.045, "y": 0.14,
-            "size": 60, "gap": 6,
+            "x": 0.075, "y": 0.165,
+            "size": 56, "gap": 6,
             "dx": 0, "dy": 0,
         },
-        "pnl":   {"x": 0.06,  "y": 0.39, "anchor": "lm"},
-        "entry": {"x": 0.063, "y": 0.54, "anchor": "lm"},
-        "exit":  {"x": 0.063, "y": 0.65, "anchor": "lm"},
-        "price": {"x": 0.23,  "y": 0.72, "anchor": "lm"},
+        # Symbol + side pill row (just above ROI label which sits at y≈0.324)
+        "symbol":    {"x": 0.075, "y": 0.275, "anchor": "lm"},
+        # Big ROI %  (template label "ROI" at y≈0.324, value sits BELOW it)
+        "pnl":       {"x": 0.075, "y": 0.430, "anchor": "lm"},
+        # Entry / current price values BELOW their respective labels
+        # (template "Цена входа" at y≈0.505 → value at 0.560)
+        # (template "Текущая цена" at y≈0.606 → value at 0.665)
+        "entry":     {"x": 0.075, "y": 0.560, "anchor": "lm"},
+        "exit":      {"x": 0.075, "y": 0.665, "anchor": "lm"},
+        # Reference footer band:
+        # - line 2 "более ____ в бонусах!" has a gap at x≈[160-260], y≈1080
+        # - line 3 "Реферальный код: ___" has colon at x≈393, text-center y≈1126
+        "price":     {"x": 0.23,  "y": 0.72, "anchor": "lm"},
+        "bonus":     {"x": 0.190, "y": 0.913, "anchor": "lm"},
+        "referral":  {"x": 0.480, "y": 0.951, "anchor": "lm"},
 
-        # Кросс 20x
+        # Side pill (Long 50.0X / Short 50.0X) — anchored next to symbol, sized dynamically
         "cross_leverage": {
-            "x": 0.35, "y": 0.24,
-            "w": 0.16, "h": 0.08,
-            "pad_x": 12, "pad_y": 8,
-            "radius": 65,
+            "x": 0.45, "y": 0.275,
+            "w": 0.16, "h": 0.06,
+            "pad_x": 22, "pad_y": 12,
+            "radius": 50,
         },
 
-        # Очистка
-        "clear_entry":    {"x": 0.28, "y": 0.53, "w": 0.18, "h": 0.10},
-        "clear_exit":     {"x": 0.45, "y": 0.53, "w": 0.18, "h": 0.10},
-        "clear_pnl":      {"x": 0.55, "y": 0.22, "w": 0.40, "h": 0.18},
-        "clear_leverage": {"x": 0.28, "y": 0.30, "w": 0.18, "h": 0.08},
+        # No clear-zones — template is already clean of values
     },
 
     "bingx": {

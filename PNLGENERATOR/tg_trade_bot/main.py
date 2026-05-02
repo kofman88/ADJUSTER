@@ -78,8 +78,10 @@ def _load_icon(path: str, size: int) -> Image.Image:
 # FSM
 # =====================================================
 class CustomExchange(StatesGroup):
+    template = State()
     username = State()
     side = State()
+    status = State()
     symbol = State()
     entry = State()
     exit_price = State()
@@ -211,6 +213,31 @@ skip_kb = InlineKeyboardMarkup(
     inline_keyboard=[[InlineKeyboardButton(text="⏭ Пропустить", callback_data="skip_field")]]
 )
 
+# BingX custom-template chooser ----------------------------------------------
+BINGX_TEMPLATES = ("football", "curve", "doge")
+BINGX_TEMPLATE_LABELS = {
+    "football": "⚽ Футбол",
+    "curve":    "📉 Свеча",
+    "doge":     "🐕 Доге",
+}
+
+bingx_template_kb = InlineKeyboardMarkup(
+    inline_keyboard=[[
+        InlineKeyboardButton(text=BINGX_TEMPLATE_LABELS["football"], callback_data="bingx_tpl:football"),
+        InlineKeyboardButton(text=BINGX_TEMPLATE_LABELS["curve"],    callback_data="bingx_tpl:curve"),
+        InlineKeyboardButton(text=BINGX_TEMPLATE_LABELS["doge"],     callback_data="bingx_tpl:doge"),
+    ]]
+)
+
+# Open vs closed position chooser (controls "Нереализованная П/У" / "Реализованная П/У"
+# header and "Последняя цена" / "Цена закрытия" label)
+bingx_status_kb = InlineKeyboardMarkup(
+    inline_keyboard=[[
+        InlineKeyboardButton(text="🟢 Открытая", callback_data="bingx_st:open"),
+        InlineKeyboardButton(text="🏁 Закрытая", callback_data="bingx_st:closed"),
+    ]]
+)
+
 _MAIN_KB_MARKUP: InlineKeyboardMarkup | None = None
 
 def get_main_kb() -> InlineKeyboardMarkup:
@@ -337,6 +364,9 @@ async def test_all(message: Message):
         "/test_custom_bybit_short\n"
         "/test_custom_bingx_long\n"
         "/test_custom_bingx_short\n"
+        "/test_custom_bingx_short_football\n"
+        "/test_custom_bingx_short_curve\n"
+        "/test_custom_bingx_short_doge\n"
         "/test_custom_bybit_usdt_long\n"
         "/test_custom_bybit_usdt_short"
     )
@@ -403,7 +433,7 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
         logger.error(f"Image generation error: {e}")
         await message.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
 
-async def _run_custom_test(message: Message, exchange: str, side: str):
+async def _run_custom_test(message: Message, exchange: str, side: str, template: str | None = None, status: str | None = None):
     entry = 0.1068
     exit_price = 0.1092 if side == "long" else 0.1040
     leverage_str = "50x"
@@ -425,6 +455,10 @@ async def _run_custom_test(message: Message, exchange: str, side: str):
         "referral": "D1BFA4",
         "datetime_str": "02/14 19:00",
     }
+    if template:
+        image_data["template"] = template
+    if status:
+        image_data["status"] = status
 
     loop = asyncio.get_event_loop()
     try:
@@ -456,6 +490,21 @@ async def test_custom_bingx_long(message: Message):
 @dp.message(Command("test_custom_bingx_short"))
 async def test_custom_bingx_short(message: Message):
     await _run_custom_test(message, exchange="bingx", side="short")
+
+
+@dp.message(Command("test_custom_bingx_short_curve"))
+async def test_custom_bingx_short_curve(message: Message):
+    await _run_custom_test(message, exchange="bingx", side="short", template="curve")
+
+
+@dp.message(Command("test_custom_bingx_short_doge"))
+async def test_custom_bingx_short_doge(message: Message):
+    await _run_custom_test(message, exchange="bingx", side="short", template="doge")
+
+
+@dp.message(Command("test_custom_bingx_short_football"))
+async def test_custom_bingx_short_football(message: Message):
+    await _run_custom_test(message, exchange="bingx", side="short", template="football")
 
 
 async def _run_custom_usdt_test(message: Message, side: str):
@@ -745,7 +794,6 @@ async def get_leverage(message: Message, state: FSMContext):
     if message.from_user.username:
         data["telegram_username"] = message.from_user.username
 
-    # Check daily limit for non-premium users
     has_access, _ = check_access(message.from_user.id)
     if not has_access:
         can_use, remaining = check_daily_limit(message.from_user.id)
@@ -758,14 +806,12 @@ async def get_leverage(message: Message, state: FSMContext):
             await state.clear()
             return
 
-    # PIL-рендеринг в пуле потоков
     loop = asyncio.get_event_loop()
     try:
         path = await loop.run_in_executor(
             _THREAD_POOL, generate_trade_image, data, percent, percent, pnl_usdt
         )
         await message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
-        # Increment usage for free users
         has_access, _ = check_access(message.from_user.id)
         if not has_access:
             increment_usage(message.from_user.id)
@@ -784,6 +830,7 @@ async def get_leverage(message: Message, state: FSMContext):
             f"Текущий баланс: {balance:.2f} USDT\n"
             f"Итог: {pnl_total:+.2f} USDT ({pnl_pct:+.2f}%)"
         )
+    await state.clear()
     await state.clear()
 
 # =====================================================
@@ -994,15 +1041,18 @@ def draw_gray_box(draw, x, y, text, font, cfg):
     padding_x = cfg.get("pad_x", 16)
     padding_y = cfg.get("pad_y", 10)
     min_h = cfg.get("min_h", 0)
+    min_w = cfg.get("min_w", 0)
     radius = cfg.get("radius", 14)
     bbox = draw.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     box_h = max(min_h, h + padding_y * 2)
-    # Цвет заливки из BingX template.png: (18, 18, 18)
+    box_w = max(min_w, w + padding_x * 2)
+    # Pill colour from new BingX UI ≈ (35,35,38) — clearly visible on dark bg
+    fill = cfg.get("fill", (35, 35, 38))
     draw.rounded_rectangle(
-        (x - w // 2 - padding_x, y - box_h // 2,
-         x + w // 2 + padding_x, y + box_h // 2),
-        radius=radius, fill=(18, 18, 18),
+        (x - box_w // 2, y - box_h // 2,
+         x + box_w // 2, y + box_h // 2),
+        radius=radius, fill=fill,
     )
     draw.text((x, y), text, fill=(255, 255, 255), font=font, anchor="mm")
 
@@ -1152,7 +1202,11 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
 
     symbol_text = data["symbol"]
     badge_text = "Лонг" if data["side"] == "long" else "Шорт"
-    pnl_text = f"{pnl_usdt:+.2f}({pnl:+.2f}%)"
+    if exchange == "bingx":
+        # BingX UI: full 4-decimal precision and a space before the bracketed pct
+        pnl_text = f"{pnl_usdt:+.4f} ({pnl:+.2f}%)"
+    else:
+        pnl_text = f"{pnl_usdt:+.2f}({pnl:+.2f}%)"
     lev_text = f"Кросс {data['leverage']}x" if exchange == "bybit" else ""
 
     sx, sy = pos(layout["symbol"])
@@ -1177,7 +1231,7 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         mx, my = pos(layout["margin_mode"])
         lbx, lby = pos(layout["leverage_bingx"])
         draw_gray_box(draw, mx, my, "Кросс", badge_font, layout["margin_mode"])
-        draw_gray_box(draw, lbx, lby, f"{data['leverage']}x", badge_font, layout["leverage_bingx"])
+        draw_gray_box(draw, lbx, lby, f"{data['leverage']}X", badge_font, layout["leverage_bingx"])
         draw_bingx_icon(img, data["symbol"], layout, symbol_font, w, h)
 
         
@@ -1187,11 +1241,14 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         qty_value = float(data.get("qty") or 0)
         qty_text = format_qty(qty_value)
     else:  # bingx
-        # BingX: маржа * плечо (позиция в USDT)
-        margin = float(data.get("amount") or 0)
-        lev = float(data.get("leverage") or 0)
-        qty_value = margin * lev
-        qty_text = format_qty(qty_value)
+        # BingX UI shows current notional: qty × mark price (not entry-based notional)
+        margin_v = float(data.get("amount") or 0)
+        lev_v = float(data.get("leverage") or 0)
+        entry_v = float(data.get("entry") or 0)
+        mark_v = float(data.get("mark") or 0)
+        qty_unrounded = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
+        qty_value = qty_unrounded * (mark_v if mark_v else entry_v)
+        qty_text = f"{qty_value:,.2f}"
 
     # рисуем qty для ОБЕИХ бирж
     draw_text(
@@ -1247,19 +1304,32 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     precision = data.get("price_precision")
 
     if exchange == "bingx":
-        margin_usdt = float(data.get("amount") or 0) * float(data.get("leverage") or 0)
-        draw_text(draw, layout, "margin", f"{data['amount']:.2f}", font_regular, sizes["qty"], WHITE, w, h)
+        # BingX-style margin: thousands comma + 4 decimals (e.g. "1,713.2700")
+        margin_disp = f"{float(data['amount']):,.4f}"
+        draw_text(draw, layout, "margin", margin_disp, font_regular, sizes["qty"], WHITE, w, h)
         draw_text(draw, layout, "entry", format_price(data["entry"], precision), font_regular, sizes["entry"], WHITE, w, h)
         draw_text(draw, layout, "mark", format_price(data["mark"], precision), font_regular, sizes["mark"], WHITE, w, h)
-        draw_text(draw, layout, "liq", format_price(data["liquidation"], precision), font_regular, sizes["liq"], ORANGE, w, h)
+        # Liquidation in green when far from entry (safe), orange when close
+        entry_v = float(data.get("entry") or 0)
+        liq_v   = float(data.get("liquidation") or 0)
+        liq_color = GREEN if (entry_v > 0 and abs(liq_v - entry_v) / entry_v > 0.05) else ORANGE
+        draw_text(draw, layout, "liq", format_price(liq_v, precision), font_regular, sizes["liq"], liq_color, w, h)
 
     if exchange == "bingx" and "risk" in layout:
-        entry_v = float(data.get("entry") or 0)
-        qty_v = float(data.get("qty") or 0)
+        # BingX "Риск" = Margin Ratio = maintenance_margin / margin_balance × 100
+        # mm rate ≈ 0.4% of position notional for major coins
         margin_v = float(data.get("amount") or 0)
-        pos_margin = entry_v * qty_v
-        if pos_margin and margin_v:
-            risk = margin_v / pos_margin * 100.0
+        lev_v    = float(data.get("leverage") or 0)
+        entry_v  = float(data.get("entry") or 0)
+        mark_v   = float(data.get("mark") or 0)
+        qty_u = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
+        position = qty_u * (mark_v if mark_v else entry_v)
+        is_long_local = data.get("side") == "long"
+        raw_pnl = (qty_u * (mark_v - entry_v)) if is_long_local else (qty_u * (entry_v - mark_v))
+        maint_margin = position * 0.004
+        margin_balance = margin_v + raw_pnl
+        if margin_balance > 0 and position > 0:
+            risk = maint_margin / margin_balance * 100.0
             risk_text = f"{risk:.2f}%" if round(risk, 2) != 0 else "--"
             risk_color = GREEN if risk <= 40 else (ORANGE if risk <= 70 else RED)
         else:
@@ -1304,83 +1374,121 @@ def generate_custom_bybit_image(data: dict) -> str:
     cfg = FONTS["custom_bybit"]
     layout = BYBIT_CUSTOM_LAYOUT["bybit"]
 
-    # Шаблоны screenshot_long/short.png чистые — очистка зон НЕ нужна
-    # (clear zones ломают декоративные элементы: ракету/кошелёк)
-
     icon_path = os.path.join(BASE_DIR, "assets", "bybit", "icon.png")
     cfg_icon = layout.get("symbol_icon")
     if os.path.exists(icon_path) and cfg_icon:
         size = cfg_icon.get("size", 60)
         icon = _load_icon(icon_path, size)
-        img.paste(icon, (int(cfg_icon["x"] * w) + cfg_icon.get("dx", 0),
-                         int(cfg_icon["y"] * h) + cfg_icon.get("dy", 0)), icon)
+        ix = int(cfg_icon["x"] * w) + cfg_icon.get("dx", 0)
+        iy = int(cfg_icon["y"] * h) + cfg_icon.get("dy", 0)
+        # Center the icon vertically on the username y
+        img.paste(icon, (ix, iy - size // 2), icon)
         draw = ImageDraw.Draw(img)
 
     fp = lambda name, bold=False: os.path.join(BASE_DIR, cfg["files"]["bold" if bold else "regular"])
     username_font = _load_font(fp("regular"), cfg["sizes"]["username"])
-    symbol_font = _load_font(fp("bold", True), cfg["sizes"]["symbol"])
+    symbol_font   = _load_font(fp("bold", True), cfg["sizes"]["symbol"])
     pnl_text = f"{pnl:+.2f}%"
     pnl_size = cfg["sizes"]["pnl"]
     _dummy_draw = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
     pnl_x = int(layout["pnl"]["x"] * w)
-    max_pnl_w = int(w * 0.63) - pnl_x
+    # Allow PnL to span up to 75% of width so big numbers like -100.79% stay big
+    max_pnl_w = int(w * 0.78) - pnl_x
     while pnl_size > 40:
         _pf = _load_font(fp("bold", True), pnl_size)
         _bb = _dummy_draw.textbbox((0, 0), pnl_text, font=_pf)
         if (_bb[2] - _bb[0]) <= max_pnl_w:
             break
         pnl_size -= 4
-    pnl_font = _load_font(fp("bold", True), pnl_size)
+    pnl_font   = _load_font(fp("bold", True), pnl_size)
     entry_font = _load_font(fp("bold", True), cfg["sizes"]["entry"])
-    exit_font = _load_font(fp("bold", True), cfg["sizes"]["exit"])
-    lev_font = _load_font(fp("regular"), cfg["sizes"]["leverage_text"])
+    exit_font  = _load_font(fp("bold", True), cfg["sizes"]["exit"])
+    lev_font   = _load_font(fp("regular"), cfg["sizes"]["leverage_text"])
+    ref_font   = _load_font(fp("bold", True), cfg["sizes"].get("referral", 30))
 
-    # Цвета из Bybit share card (pnl_card.py BYBIT_CONFIG)
     WHITE = (255, 255, 255)
-    GREEN = (0, 208, 132)     # #00D084 — Bybit profit
-    RED   = (255, 59, 92)     # #FF3B5C — Bybit loss
-    GRAY  = (140, 150, 172)   # #8C96AC — серые лейблы
+    GREEN = (0, 208, 132)
+    RED   = (255, 59, 92)
+    GRAY  = (140, 150, 172)
 
     def pos(c):
         return int(c["x"] * w) + c.get("dx", 0), int(c["y"] * h) + c.get("dy", 0)
 
+    # Username (gray), inline with avatar icon
     if "username" in data and "username" in layout:
         draw.text(pos(layout["username"]), data["username"], fill=GRAY, font=username_font, anchor="lm")
+
+    # Symbol (white bold)
     if "symbol" in layout:
         draw.text(pos(layout["symbol"]), data["symbol"], fill=WHITE, font=symbol_font, anchor="lm")
+
+    # ROI big % value — RED if loss, GREEN if profit
     if "pnl" in layout:
         pnl_color = GREEN if pnl >= 0 else RED
         draw.text(pos(layout["pnl"]), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
+
+    # Prices (white bold). Prefer the user's original input string so trailing
+    # zeros and exact precision (e.g. "3.46670") are preserved.
+    entry_text = (data.get("entry_str") or "").strip() or format_price(data["entry"])
+    exit_text  = (data.get("exit_str")  or "").strip() or format_price(data["exit"])
     if "entry" in layout:
-        draw.text(pos(layout["entry"]), format_price(data["entry"]), fill=WHITE, font=entry_font, anchor="lm")
+        draw.text(pos(layout["entry"]), entry_text, fill=WHITE, font=entry_font, anchor="lm")
     if "exit" in layout:
-        draw.text(pos(layout["exit"]), format_price(data["exit"]), fill=WHITE, font=exit_font, anchor="lm")
+        draw.text(pos(layout["exit"]), exit_text, fill=WHITE, font=exit_font, anchor="lm")
+
+    # Side pill: "Long 50.0X" / "Short 50.0X" with semi-transparent bg, colored text
     if "cross_leverage" in layout:
-        direction_text = "Лонг" if data["side"] == "long" else "Шорт"
-        leverage_num = float(str(data["leverage"]).replace("x", ""))
+        direction_text = "Long" if data["side"] == "long" else "Short"
+        leverage_num = float(str(data["leverage"]).replace("x", "").replace("X", ""))
         lev_text = f"{direction_text} {leverage_num:.1f}X"
         sym_bbox = draw.textbbox((0, 0), data["symbol"], font=symbol_font)
         sym_pixel_w = sym_bbox[2] - sym_bbox[0]
         sym_x = int(layout["symbol"]["x"] * w) + layout["symbol"].get("dx", 0)
-        padding_x, padding_y = 18, 10
+        cl = layout["cross_leverage"]
+        padding_x, padding_y = cl.get("pad_x", 22), cl.get("pad_y", 12)
         bbox = draw.textbbox((0, 0), lev_text, font=lev_font)
         box_w = bbox[2] - bbox[0] + padding_x * 2
         box_h = bbox[3] - bbox[1] + padding_y * 2
-        gap = 16
+        gap = 18
         badge_center_x = sym_x + sym_pixel_w + gap + box_w // 2
-        lev_pos = (badge_center_x, layout["cross_leverage"]["y"] * h)
+        lev_pos = (badge_center_x, int(cl["y"] * h))
         x1, y1 = lev_pos[0] - box_w // 2, lev_pos[1] - box_h // 2
         x2, y2 = x1 + box_w, y1 + box_h
-        # Полупрозрачный фон через RGBA overlay (как в pnl_card.py)
         overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
         ImageDraw.Draw(overlay).rounded_rectangle(
-            [x1, y1, x2, y2], radius=60,
-            fill=(35, 35, 48, 110),
+            [x1, y1, x2, y2], radius=cl.get("radius", 50),
+            fill=(35, 35, 48, 130),
         )
         img = Image.alpha_composite(img, overlay)
         draw = ImageDraw.Draw(img)
         text_color = GREEN if data["side"] == "long" else RED
         draw.text(lev_pos, lev_text, fill=text_color, font=lev_font, anchor="mm")
+
+    # The two Bybit templates differ on the white footer band:
+    # - screenshot_long.png  : "Присоединяйтесь и получите / более __ в бонусах! / Реферальный код:"
+    #                          ($5,000 missing; "Реферальный код:" label present, value missing)
+    # - screenshot_short.png : "Присоединяйтесь и получите / более $5,000 в бонусах!"
+    #                          ($5,000 baked in; no "Реферальный код:" label)
+    if template_side == "long":
+        # Render "$5,000" centered in the gap on line 2
+        bonus_font = _load_font(fp("regular"), 32)
+        gap_l, gap_r = int(0.155 * w), int(0.321 * w)
+        bb = draw.textbbox((0, 0), "$5,000", font=bonus_font)
+        bx = gap_l + (gap_r - gap_l - (bb[2] - bb[0])) // 2
+        draw.text((bx, int(layout["bonus"]["y"] * h)), "$5,000",
+                  fill=(0, 0, 0), font=bonus_font, anchor="lm")
+        # Render only the referral CODE after the existing "Реферальный код:" label
+        referral_code = str(data.get("referral", "")).strip()
+        if referral_code and "referral" in layout:
+            draw.text(pos(layout["referral"]), referral_code,
+                      fill=(0, 0, 0), font=ref_font, anchor="lm")
+    else:  # short
+        # Render the FULL "Реферальный код: <code>" line below "более $5,000 в бонусах!"
+        referral_code = str(data.get("referral", "")).strip()
+        if referral_code:
+            full = f"Реферальный код: {referral_code}"
+            draw.text((int(0.041 * w), int(0.951 * h)), full,
+                      fill=(0, 0, 0), font=ref_font, anchor="lm")
 
     img.save(output_path)
     _cleanup_old_files(os.path.dirname(output_path), "custom_bybit_")
@@ -1483,109 +1591,125 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
 
 
 def generate_custom_bingx_image(data: dict) -> str:
+    """Render BingX share card pixel-matched to user's reference templates.
+    All text is drawn programmatically on top of a clean background that
+    contains only: BingX logo, right-side decoration, CHM_LAB triangle, QR."""
     try:
         pnl = float(str(data["pnl"]).replace("%", "").replace(",", "."))
     except ValueError:
         pnl = 0.0
     template_side = "long" if pnl >= 0 else "short"
-    template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}.png")
+    template_variant = data.get("template", "football")
+    if template_variant not in ("football", "curve", "doge"):
+        template_variant = "football"
+    template_path = os.path.join(BASE_DIR, "assets", "bingx", f"clean_{template_side}_{template_variant}.png")
+    if not os.path.exists(template_path):
+        # legacy fallback if a clean asset is missing
+        template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}.png")
     output_dir = os.path.join(BASE_DIR, "images")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"custom_bingx_{uuid.uuid4().hex[:8]}.png")
 
-    if not os.path.exists(template_path):
-        raise FileNotFoundError(f"Создай {template_path}")
-
     img = _load_template(template_path).copy()
+    w, h = img.size  # 1800x1800
     draw = ImageDraw.Draw(img)
-    w, h = img.size
-    cfg = FONTS["custom_bingx"]
-    layout = BYBIT_CUSTOM_LAYOUT["bingx"]
 
-    fp_r = os.path.join(BASE_DIR, cfg["files"]["regular"])
-    fp_b = os.path.join(BASE_DIR, cfg["files"]["bold"])
-    username_font = _load_font(fp_r, cfg["sizes"]["username"])
-    symbol_font = _load_font(fp_b, cfg["sizes"]["symbol"])
-    pnl_font = _load_font(fp_b, cfg["sizes"]["pnl"])
-    entry_font = _load_font(fp_b, cfg["sizes"]["entry"])
-    exit_font = _load_font(fp_b, cfg["sizes"]["exit"])
-    lev_font = _load_font(fp_r, cfg["sizes"]["leverage_text"])
-    small_font = _load_font(fp_r, cfg["sizes"].get("leverage_text", 36))
+    fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
+    fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    draw_custom_bingx_lines(img, data, layout, small_font, symbol_font, w, h)
+    # Font sizes calibrated to user's 1800x1800 reference cards
+    f_header   = _load_font(fp_b, 80)    # "Нереализованная П/У"
+    f_meta     = _load_font(fp_b, 92)    # "ETHUSDT │ Шорт │ 5X"
+    f_pnl      = _load_font(fp_b, 280)   # "-4.07%"
+    f_label    = _load_font(fp_r, 56)    # "Последняя цена" / "Цена входа"
+    f_value    = _load_font(fp_b, 56)    # numeric values
+    f_username = _load_font(fp_b, 60)    # CHM_LAB
+    f_date     = _load_font(fp_r, 50)    # "05-02"
+    f_ref_lbl  = _load_font(fp_r, 56)    # "Реферальный код"
+    f_ref_code = _load_font(fp_b, 56)    # "D1BFA4"
 
-    # Цвета из BingX share card (pnl_card.py BINGX_CONFIG)
     WHITE = (255, 255, 255)
-    GREEN = (0, 200, 122)      # #00C87A — BingX profit
-    RED   = (255, 45, 120)     # #FF2D78 — BingX loss
-    GRAY  = (130, 140, 165)    # серые лейблы BingX
+    GREEN = (0, 200, 122)
+    RED   = (255, 45, 120)
+    GRAY  = (138, 147, 168)
+    SEP   = (90, 95, 110)
 
-    def pos(c):
-        return int(c["x"] * w), int(c["y"] * h)
+    side = data.get("side", "long")
+    side_color = GREEN if side == "long" else RED
+    side_text  = "Лонг" if side == "long" else "Шорт"
 
-    if "username" in data and "username" in layout:
-        draw.text(pos(layout["username"]), data["username"], fill=WHITE, font=username_font)
-    if "symbol" in layout:
-        draw.text(pos(layout["symbol"]), data["symbol"], fill=WHITE, font=symbol_font)
-    if "pnl" in layout:
-        pnl_color = GREEN if pnl >= 0 else RED
-        draw.text(pos(layout["pnl"]), f"{pnl:+.2f}%", fill=pnl_color, font=pnl_font)
-    # "Цена маркировки" label is upper (layout["entry"]) → exit price
-    # "Цена входа" label is lower (layout["exit"]) → entry price
-    if "entry" in layout:
-        draw.text(pos(layout["entry"]), format_price(data["exit"]), fill=WHITE, font=entry_font)
-    if "exit" in layout:
-        draw.text(pos(layout["exit"]), format_price(data["entry"]), fill=WHITE, font=exit_font)
-    datetime_text = data.get("datetime_str", "").strip()
-    referral_code = data.get("referral", "").strip()
-    if datetime_text and "datetime" in layout:
-        draw.text(pos(layout["datetime"]), datetime_text, fill=GRAY, font=small_font)
-    if referral_code and "referral" in layout:
-        draw.text(pos(layout["referral"]), referral_code, fill=WHITE, font=small_font)
+    # ----- Header: "Нереализованная / Реализованная П/У" (top-left) -----
+    header_text = "Реализованная П/У" if data.get("status") == "closed" else "Нереализованная П/У"
+    draw.text((130, 480), header_text, fill=WHITE, font=f_header, anchor="lm")
+
+    # ----- Symbol │ Side │ Leverage row -----
+    symbol  = str(data.get("symbol", "")).upper()
+    lev_raw = str(data.get("leverage", "")).strip().lower().replace("x", "")
+    lev_text = f"{lev_raw}X" if lev_raw else ""
+
+    meta_y = 660
+    x = 130
+    sep_gap = 40            # space on each side of separator
+    sep_h = 70              # vertical line height
+    sep_thick = 3           # line thickness
+
+    def draw_sep(cx: int):
+        draw.rectangle(
+            [cx - sep_thick // 2, meta_y - sep_h // 2, cx + sep_thick // 2 + sep_thick % 2, meta_y + sep_h // 2],
+            fill=SEP,
+        )
+
+    # Symbol
+    draw.text((x, meta_y), symbol, fill=WHITE, font=f_meta, anchor="lm")
+    x += draw.textlength(symbol, font=f_meta) + sep_gap
+    draw_sep(x); x += sep_gap
+    # Side (colored)
+    draw.text((x, meta_y), side_text, fill=side_color, font=f_meta, anchor="lm")
+    x += draw.textlength(side_text, font=f_meta) + sep_gap
+    draw_sep(x); x += sep_gap
+    # Leverage
+    if lev_text:
+        draw.text((x, meta_y), lev_text, fill=WHITE, font=f_meta, anchor="lm")
+
+    # ----- Huge PnL -----
+    pnl_color = GREEN if pnl >= 0 else RED
+    pnl_text  = f"{pnl:+.2f}%"
+    draw.text((125, 920), pnl_text, fill=pnl_color, font=f_pnl, anchor="lm")
+
+    # ----- Price rows: "Последняя цена / Цена закрытия" + "Цена входа" -----
+    label_top = "Последняя цена" if data.get("status", "open") != "closed" else "Цена закрытия"
+    last_price_y  = 1240
+    entry_price_y = 1340
+
+    # Labels (gray) — left aligned
+    draw.text((140, last_price_y),  label_top,    fill=GRAY, font=f_label, anchor="lm")
+    draw.text((140, entry_price_y), "Цена входа", fill=GRAY, font=f_label, anchor="lm")
+
+    # Values (white, bold) — aligned at fixed x. BingX style: no thousands separator.
+    def _fmt(v):
+        return format_price(v).replace(",", "")
+    val_x = 720
+    draw.text((val_x, last_price_y),  _fmt(data.get("exit",  0)), fill=WHITE, font=f_value, anchor="lm")
+    draw.text((val_x, entry_price_y), _fmt(data.get("entry", 0)), fill=WHITE, font=f_value, anchor="lm")
+
+    # ----- Username + date (under triangle on bottom-left) -----
+    username = str(data.get("username", "")).strip()
+    datetime_text = str(data.get("datetime_str", "")).strip()
+    if username:
+        draw.text((290, 1655), username, fill=WHITE, font=f_username, anchor="lm")
+    if datetime_text:
+        draw.text((290, 1720), datetime_text, fill=GRAY, font=f_date, anchor="lm")
+
+    # ----- Referral label + code (bottom-right, left of QR) -----
+    referral_code = str(data.get("referral", "")).strip()
+    # QR sits at x≈1560-1705. Anchor referral text right-aligned at x=1530.
+    draw.text((1530, 1580), "Реферальный код", fill=GRAY, font=f_ref_lbl, anchor="rm")
+    if referral_code:
+        draw.text((1530, 1660), referral_code, fill=WHITE, font=f_ref_code, anchor="rm")
 
     img.save(output_path)
-
-    # Синхронная очистка старых файлов — здесь мы уже в пуле потоков
     _cleanup_old_files(os.path.dirname(output_path), "custom_bingx_")
-
     return output_path
-
-
-def draw_custom_bingx_lines(img, data, layout, font_side, font_symbol, w, h):
-    symbol = data["symbol"]
-    cfg = layout.get("lines")
-    if not cfg:
-        return
-    line_path = os.path.join(BASE_DIR, "assets", "bingx", "line.png")
-    if not os.path.exists(line_path):
-        return
-    size = int(cfg.get("size", 80))
-    line = _load_icon(line_path, size)
-    base_x = int(cfg["x"] * w + cfg.get("dx", 0))
-    base_y = int(cfg["y"] * h + cfg.get("dy", 0))
-    dummy = Image.new("RGBA", (10, 10))
-    bbox_sym = ImageDraw.Draw(dummy).textbbox((0, 0), symbol, font=font_symbol)
-    sym_width = bbox_sym[2] - bbox_sym[0]
-    gap = cfg.get("gap", 10)
-    spacing = cfg.get("spacing", 221)
-    x1, y1 = base_x + sym_width + gap, base_y
-    x2, y2 = x1 + size + spacing, base_y
-    img.paste(line, (x1, y1), line)
-    img.paste(line, (x2, y2), line)
-    draw = ImageDraw.Draw(img)
-    side_cfg = layout.get("side_position", {})
-    side_x = int(side_cfg.get("x", 0.5) * w)
-    side_y = int(side_cfg.get("y", 0.335) * h)
-    side_text = "Лонг" if data.get("side") == "long" else "Шорт"
-    side_color = (0, 200, 122) if data.get("side") == "long" else (255, 45, 120)
-    draw.text((side_x, side_y), side_text, fill=side_color, font=font_side, anchor=side_cfg.get("anchor", "lm"))
-    lev_cfg = layout.get("leverage_position", {})
-    lev_x = int(lev_cfg.get("x", 0.15) * w)
-    lev_y = int(lev_cfg.get("y", 0.335) * h)
-    lev_raw = str(data.get("leverage", "")).replace("x", "").upper()
-    if lev_raw:
-        draw.text((lev_x, lev_y), f"{lev_raw}X", fill=(255, 255, 255), font=font_side,
-                  anchor=lev_cfg.get("anchor", "lm"))
 
 # =====================================================
 # CUSTOM EXCHANGE (FSM)
@@ -1613,7 +1737,29 @@ async def start_custom_bingx(cb: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await state.update_data(exchange="bingx")
-    msg = await cb.message.answer("👤 Введите имя пользователя:")
+    msg = await cb.message.answer(
+        "🎨 Выбери шаблон:",
+        reply_markup=bingx_template_kb,
+    )
+    await state.update_data(custom_last_msg_id=msg.message_id)
+    await state.set_state(CustomExchange.template)
+
+
+@dp.callback_query(CustomExchange.template, F.data.startswith("bingx_tpl:"))
+async def custom_bingx_template(call: CallbackQuery, state: FSMContext):
+    template = call.data.split(":", 1)[1]
+    if template not in BINGX_TEMPLATES:
+        await call.answer("❌ Неизвестный шаблон")
+        return
+    await state.update_data(template=template)
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
+    msg = await call.message.answer(
+        f"Шаблон: {BINGX_TEMPLATE_LABELS[template]}\n👤 Введите имя пользователя:"
+    )
     await state.update_data(custom_last_msg_id=msg.message_id)
     await state.set_state(CustomExchange.username)
 
@@ -1838,6 +1984,34 @@ async def custom_side(call: CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.debug(f"Non-critical error: {e}")
     data = await state.get_data()
+    # BingX cards have a header that depends on whether the position is still open
+    # (Нереализованная П/У) or closed (Реализованная П/У). Ask only for bingx.
+    if data.get("exchange") == "bingx":
+        new = await call.message.answer(
+            f"{build_custom_summary(data)}\n📊 Тип позиции:",
+            reply_markup=bingx_status_kb,
+        )
+        await state.update_data(custom_last_msg_id=new.message_id)
+        await state.set_state(CustomExchange.status)
+        return
+    new = await call.message.answer(f"{build_custom_summary(data)}\n🪙 Торговая пара (например BTCUSDT):")
+    await state.update_data(custom_last_msg_id=new.message_id)
+    await state.set_state(CustomExchange.symbol)
+
+
+@dp.callback_query(CustomExchange.status, F.data.startswith("bingx_st:"))
+async def custom_bingx_status(call: CallbackQuery, state: FSMContext):
+    status = call.data.split(":", 1)[1]
+    if status not in ("open", "closed"):
+        await call.answer("❌ Неизвестный тип")
+        return
+    await state.update_data(status=status)
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
+    data = await state.get_data()
     new = await call.message.answer(f"{build_custom_summary(data)}\n🪙 Торговая пара (например BTCUSDT):")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.symbol)
@@ -1859,10 +2033,11 @@ async def custom_symbol(msg: Message, state: FSMContext):
 
 @dp.message(CustomExchange.entry)
 async def custom_entry(msg: Message, state: FSMContext):
+    raw_text = msg.text.strip().replace(",", ".") if msg.text else ""
     value = await parse_float(msg)
     if value is None:
         return
-    await state.update_data(entry=value)
+    await state.update_data(entry=value, entry_str=raw_text)
     await safe_delete_message(msg)
     data = await state.get_data()
     last_id = data.get("custom_last_msg_id")
@@ -1871,16 +2046,23 @@ async def custom_entry(msg: Message, state: FSMContext):
             await msg.bot.delete_message(msg.chat.id, last_id)
         except Exception as e:
             logger.debug(f"Non-critical error: {e}")
-    new = await msg.answer(f"{build_custom_summary(data)}\nЦена выхода (например 123456.12):")
+    if data.get("exchange") == "bingx" and data.get("status") == "open":
+        prompt = "Последняя цена (например 123456.12):"
+    elif data.get("exchange") == "bingx" and data.get("status") == "closed":
+        prompt = "Цена закрытия (например 123456.12):"
+    else:
+        prompt = "Цена выхода (например 123456.12):"
+    new = await msg.answer(f"{build_custom_summary(data)}\n{prompt}")
     await state.update_data(custom_last_msg_id=new.message_id)
     await state.set_state(CustomExchange.exit_price)
 
 @dp.message(CustomExchange.exit_price)
 async def custom_exit(msg: Message, state: FSMContext):
+    raw_text = msg.text.strip().replace(",", ".") if msg.text else ""
     value = await parse_float(msg)
     if value is None:
         return
-    await state.update_data(exit=value)
+    await state.update_data(exit=value, exit_str=raw_text)
     await safe_delete_message(msg)
     data = await state.get_data()
     last_id = data.get("custom_last_msg_id")
@@ -1983,13 +2165,17 @@ async def custom_finish(msg: Message, state: FSMContext):
         "pnl": round(pnl_percent, 2),
         "entry": entry,
         "exit": exit_price,
+        "entry_str": data.get("entry_str", ""),
+        "exit_str": data.get("exit_str", ""),
+        "referral": data.get("referral", ""),
         "side": side,
     }
     loop = asyncio.get_event_loop()
     if exchange == "bingx":
         image_data["leverage"] = data["leverage"]
-        image_data["referral"] = data.get("referral", "")
         image_data["datetime_str"] = data.get("datetime_str", "")
+        image_data["template"] = data.get("template", "football")
+        image_data["status"] = data.get("status", "open")
         gen_func = generate_custom_bingx_image
     else:
         image_data["leverage"] = f"{leverage:.1f}x"
