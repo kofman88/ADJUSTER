@@ -1249,7 +1249,9 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     entry_v  = float(data.get("entry") or 0)
     mark_v   = float(data.get("mark") or 0)
     qty_u = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
-    position_usdt = qty_u * (mark_v if mark_v else entry_v)
+    auto_position = qty_u * (mark_v if mark_v else entry_v)
+    # Optional override so the user can dictate exact values shown on the card.
+    position_usdt = float(data["position_usdt"]) if data.get("position_usdt") is not None else auto_position
 
     # ---- 4. Row A values: Position USDT / Margin / Risk ----
     val_font = _load_font(fp_r, 38)
@@ -1260,11 +1262,14 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     wipe(1080, rowA_y - 22, 1250, rowA_y + 22)  # Risk
     pos_text = f"{position_usdt:,.2f}".rstrip("0").rstrip(".") or "0"
     mar_text = f"{margin_v:,.4f}"
-    # Risk: maintenance margin / margin balance × 100  (bingx-style approx)
-    mm_rate = 0.004
-    maint_margin = position_usdt * mm_rate
-    margin_balance = margin_v + pnl_usdt
-    risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
+    # Risk: prefer explicit override; otherwise approximate maintenance/balance ratio.
+    if data.get("risk_pct") is not None:
+        risk_val = float(data["risk_pct"])
+    else:
+        mm_rate = 0.004
+        maint_margin = position_usdt * mm_rate
+        margin_balance = margin_v + pnl_usdt
+        risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
     risk_text = f"{risk_val:.2f}%" if risk_val > 0 else "--"
     risk_color = GREEN if 0 < risk_val < 50 else (RED if risk_val >= 70 else GREEN)
 
@@ -1284,23 +1289,25 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     draw.text((1235, rowB_y), format_price(liq_v) if liq_v > 0 else "0",
               fill=liq_color, font=val_font, anchor="rm")
 
-    # ---- "Вся позиция: VALUE/--" — wipe the right side and rewrite as --/-- ----
-    # SHORT template "Вся" starts at x=793, LONG at x=837 — wipe from x=780 to be safe
+    # ---- "Вся позиция: TP/SL" — overridable via data["tp_value"] / data["sl_value"] ----
     tpsl_y = 540 + YOFF
     wipe(780, tpsl_y - 22, 1245, tpsl_y + 22)
     tpsl_font = _load_font(fp_r, 32)
+    tp_value = str(data.get("tp_value") or "--")
+    sl_value = str(data.get("sl_value") or "--")
     chev = "›"
     chev_w = draw.textlength(chev, font=tpsl_font)
     draw.text((1235, tpsl_y), chev, fill=GREY, font=tpsl_font, anchor="rm")
     cursor = 1235 - chev_w - 10
-    dash_w = draw.textlength("--", font=tpsl_font)
-    draw.text((cursor, tpsl_y), "--", fill=RED, font=tpsl_font, anchor="rm")
-    cursor -= dash_w + 4
+    sl_w = draw.textlength(sl_value, font=tpsl_font)
+    draw.text((cursor, tpsl_y), sl_value, fill=RED, font=tpsl_font, anchor="rm")
+    cursor -= sl_w + 4
     slash_w = draw.textlength("/", font=tpsl_font)
     draw.text((cursor, tpsl_y), "/", fill=GREY, font=tpsl_font, anchor="rm")
     cursor -= slash_w + 4
-    draw.text((cursor, tpsl_y), "--", fill=GREEN, font=tpsl_font, anchor="rm")
-    cursor -= dash_w + 8
+    tp_w = draw.textlength(tp_value, font=tpsl_font)
+    draw.text((cursor, tpsl_y), tp_value, fill=GREEN, font=tpsl_font, anchor="rm")
+    cursor -= tp_w + 8
     label = "Вся позиция: "
     draw.text((cursor, tpsl_y), label, fill=GREY, font=tpsl_font, anchor="rm")
 
