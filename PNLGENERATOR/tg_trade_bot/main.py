@@ -1734,7 +1734,15 @@ def generate_custom_bybit_image(data: dict) -> str:
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    def wipe(x1, y1, x2, y2, fill=BG):
+    # Sample the actual dark background colour from a guaranteed-clean spot
+    # (between BYBIT logo and chmst row). The Bybit reference has a faint
+    # chart-grid pattern over near-black; flat-fill with this sampled colour
+    # is much closer than the previous hard-coded (20,20,20).
+    bybit_bg = img.getpixel((30, 130))
+
+    def wipe(x1, y1, x2, y2, fill=None):
+        if fill is None:
+            fill = bybit_bg
         draw.rectangle([x1, y1, x2, y2], fill=fill)
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
@@ -1748,8 +1756,8 @@ def generate_custom_bybit_image(data: dict) -> str:
     symbol = data["symbol"].upper()
     sym_font = _load_font(fp_b, 62)
     sym_y_center = 320
-    # Wipe the entire symbol+pill strip
-    wipe(50, 285, 800, 355)
+    # Tight wipe — only as wide as the symbol+pill actually need
+    wipe(50, 285, 760, 355)
     draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
     sym_w = draw.textlength(symbol, font=sym_font)
 
@@ -1776,7 +1784,9 @@ def generate_custom_bybit_image(data: dict) -> str:
     while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.78) and pnl_size > 60:
         pnl_size -= 4
         pnl_font = _load_font(fp_b, pnl_size)
-    wipe(45, 455, 760, 560)
+    # Tight wipe over PnL band only — don't bleed into "ROI" label above (y<470)
+    # or "Цена входа" label below (y>635)
+    wipe(45, 470, 760, 555)
     draw.text((62, 506), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
 
     # ---- Entry / Current prices (white bold) at 46pt Semibold. Preserve user's
@@ -1784,9 +1794,9 @@ def generate_custom_bybit_image(data: dict) -> str:
     val_font = _load_font(fp_b, 46)
     entry_text = (data.get("entry_str") or "").strip() or format_price(data.get("entry", 0))
     exit_text  = (data.get("exit_str")  or "").strip() or format_price(data.get("exit", 0))
-    wipe(45, 660, 380, 720)
+    wipe(45, 663, 380, 717)
     draw.text((62, 690), entry_text, fill=WHITE, font=val_font, anchor="lm")
-    wipe(45, 790, 380, 850)
+    wipe(45, 790, 380, 845)
     draw.text((62, 816), exit_text,  fill=WHITE, font=val_font, anchor="lm")
 
     # ---- Referral code on the white footer band — replace just the value ----
