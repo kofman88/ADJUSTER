@@ -1590,8 +1590,25 @@ def generate_custom_bybit_image(data: dict) -> str:
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    def wipe(x1, y1, x2, y2, fill=BG):
-        draw.rectangle([x1, y1, x2, y2], fill=fill)
+    # Use a CLEAN canvas strip from y=225-295 (between username and symbol —
+    # contains only the BG pattern / grid). All wipes copy from there so the
+    # wipe areas keep the canvas grid instead of looking like solid black patches.
+    SRC_Y, SRC_H = 225, 70
+    src_strip = img.crop((0, SRC_Y, W, SRC_Y + SRC_H))
+
+    def wipe(x1, y1, x2, y2, fill=None):
+        """Copy a clean BG strip over [x1..x2, y1..y2], tiling vertically."""
+        x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+        if fill is not None:
+            draw.rectangle([x1, y1, x2, y2], fill=fill)
+            return
+        w = x2 - x1
+        cur_y = y1
+        while cur_y < y2:
+            ch = min(SRC_H, y2 - cur_y)
+            patch = src_strip.crop((x1, 0, x2, ch))
+            img.paste(patch, (x1, cur_y))
+            cur_y += ch
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
     username = str(data.get("username", "")).strip()
