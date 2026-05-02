@@ -30,19 +30,19 @@ FONTS = {
             "entry": 52,
             "mark": 52,
             "liq": 52,
-            "badge": 26,
+            "badge": 22,
             "badge_text_offset_y": -2,
 
             # Roomy padding so "Лонг"/"Шорт" sit comfortably inside the pill
-            "badge_pad_green_x": 18,
-            "badge_pad_green_y": 12,
-            "badge_min_green_w": 160,
-            "badge_min_green_h": 70,
+            "badge_pad_green_x": 16,
+            "badge_pad_green_y": 10,
+            "badge_min_green_w": 140,
+            "badge_min_green_h": 64,
 
-            "badge_pad_red_x": 18,
-            "badge_pad_red_y": 12,
-            "badge_min_red_w": 160,
-            "badge_min_red_h": 70,
+            "badge_pad_red_x": 16,
+            "badge_pad_red_y": 10,
+            "badge_min_red_w": 140,
+            "badge_min_red_h": 64,
            
 
         },

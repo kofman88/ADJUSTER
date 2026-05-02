@@ -27,11 +27,11 @@ LAYOUT = {
 
     "bingx": {
         # --- Обычный скрин ---
-        "symbol":    {"x": 0.055, "y": 0.115, "anchor": "lm", "dx": 0, "dy": 0},
+        "symbol":    {"x": 0.065, "y": 0.115, "anchor": "lm", "dx": 0, "dy": 0},
         "leverage":  {"x": 0.30,  "y": 0.20, "anchor": "lm"},
-        # Side pill: x is the CENTER. Pill width 190 → centered at 0.117 places its
-        # left edge at ≈83px which matches the symbol left edge (0.055 → 84px).
-        "side_badge":{"x": 0.117,  "y": 0.202, "anchor": "lm", "dx": 0, "dy": 0, "w": 150, "h": 70, "radius": 18},
+        # Side pill: x is the CENTER. Left edge of the pill aligned with the
+        # symbol left edge so the symbol sits directly above it.
+        "side_badge":{"x": 0.130,  "y": 0.202, "anchor": "lm", "dx": 0, "dy": 0, "w": 150, "h": 70, "radius": 18},
         "pnl":       {"x": 0.98,  "y": 0.20, "anchor": "rm", "dx": 0, "dy": 0},
 
         # Иконка монеты
@@ -58,12 +58,12 @@ LAYOUT = {
         # Pills: Кросс/NX with comfy padding so they read as clearly grey-filled
         # capsules (matching the new BingX UI references).
         "margin_mode": {
-            "x": 0.260, "y": 0.202,
-            "pad_x": 18, "pad_y": 12, "min_h": 70, "min_w": 170, "radius": 18,
+            "x": 0.270, "y": 0.202,
+            "pad_x": 16, "pad_y": 10, "min_h": 64, "min_w": 150, "radius": 16,
         },
         "leverage_bingx": {
-            "x": 0.378, "y": 0.202,
-            "pad_x": 18, "pad_y": 12, "min_h": 70, "min_w": 110, "radius": 18,
+            "x": 0.388, "y": 0.202,
+            "pad_x": 16, "pad_y": 10, "min_h": 64, "min_w": 100, "radius": 16,
         },
 
         # Очистка
