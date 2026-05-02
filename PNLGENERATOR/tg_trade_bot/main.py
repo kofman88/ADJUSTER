@@ -1759,13 +1759,16 @@ def generate_custom_bybit_image(data: dict) -> str:
             img.paste(sub, (x1, cur_y))
             cur_y += paint_h
 
-    # Pre-compute clean source y-ranges (per Bybit reference layout).
-    # All these spans are guaranteed clear of text and illustrations.
-    BG_STRIP_LOGO  = (120, 175)   # below BYBIT logo, above chmst   (h=55)
-    BG_STRIP_PRE   = (224, 280)   # below chmst, above symbol+pill   (h=56)
-    BG_STRIP_MID   = (355, 410)   # below symbol+pill, above ROI     (h=55)
-    BG_STRIP_SUB   = (560, 635)   # below PnL, above "Цена входа"    (h=75)
-    BG_STRIP_GAP   = (720, 758)   # below entry value, above exit lbl (h=38)
+    # Pre-computed clean source y-ranges (per Bybit reference layout).
+    # Bounds verified pixel-precise: each strip ends BEFORE the next text/label
+    # starts (anti-alias halo of "+12.72%" reaches y=545; "Цена входа" top
+    # stroke begins at y=625, so SUB ends at y=624 to avoid pasting the
+    # gray label top into the PnL wipe destination).
+    BG_STRIP_LOGO  = (110, 175)   # below BYBIT logo (y=105), above chmst (y=177)
+    BG_STRIP_PRE   = (227, 294)   # below chmst (y=224), above WIFUSDT (y=296)
+    BG_STRIP_MID   = (346, 407)   # below pill (y=343), above ROI label (y=409)
+    BG_STRIP_SUB   = (548, 624)   # below +12.72% (y=545), above "Цена входа" top (y=625)
+    BG_STRIP_GAP   = (732, 739)   # below 0.9058 (y=730), above "Текущая цена" (y=740) — only 8px, rarely used
 
     # Reference exact text positions/sizes/colours measured from
     # Bybit_custom_*.JPG (sub-pixel verified):
