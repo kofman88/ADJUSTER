@@ -1152,7 +1152,148 @@ def draw_bingx_icon(
     img.paste(icon, (x, y), icon)
 
 
+def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> str:
+    """BingX position card rendered ON TOP of the user's actual reference
+    screenshots (NORMAL_BINGX_LONG.jpg / NORMAL_BINGX_SHORT.jpg, 1290x~800).
+    Only the dynamic values are wiped and re-drawn — every static element
+    (background, pills, labels, buttons, refresh icon, candle icon) keeps
+    its original BingX styling pixel-for-pixel.
+    """
+    side = data["side"]
+    is_long = side == "long"
+    template_name = "NORMAL_BINGX_LONG.jpg" if is_long else "NORMAL_BINGX_SHORT.jpg"
+    template_path = os.path.join(BASE_DIR, "assets", "bingx", template_name)
+    if not os.path.exists(template_path):
+        # Fallback to old template if user hasn't uploaded references
+        return _legacy_generate_trade_image(data, percent, percent, pnl_usdt)
+
+    output_dir = os.path.join(BASE_DIR, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"result_{uuid.uuid4().hex[:8]}.png")
+
+    img = _load_template(template_path).copy()
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    draw = ImageDraw.Draw(img)
+    W, H = img.size
+
+    BG    = (10, 10, 10)
+    WHITE = (255, 255, 255)
+    GREEN = (44, 196, 134)
+    RED   = (245, 80, 95)
+    GREY  = (138, 144, 158)
+
+    fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
+    fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
+
+    # Y offsets between SHORT and LONG references (LONG sits ~16px higher)
+    YOFF = -16 if is_long else 0
+
+    def wipe(x1, y1, x2, y2):
+        draw.rectangle([x1, y1, x2, y2], fill=BG)
+
+    # ---- 1. Symbol (e.g. ETHUSDT / GIGGLEUSDT) ----
+    # 46pt SF Pro Semibold matches the original BingX symbol size (ETHUSDT≈204px).
+    # Wipe area sized for any reasonable symbol; candle icon sits at x≈290-325.
+    symbol = data["symbol"].upper()
+    sym_y_center = 67 + YOFF
+    sym_font = _load_font(fp_b, 46)
+    sym_w = draw.textlength(symbol, font=sym_font)
+    wipe(45, 45 + YOFF, max(280, int(52 + sym_w + 24)), 95 + YOFF)
+    draw.text((52, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
+
+    # ---- 2. Leverage pill text (e.g. "5X") — wipe and rewrite to match user's leverage ----
+    lev_int = int(float(str(data["leverage"]).replace("x", "").replace("X", "")))
+    lev_text = f"{lev_int}X"
+    lev_pill_y = (110 + 169) // 2 + YOFF
+    lev_pill_x = (336 + 416) // 2  # short pill bounds
+    if is_long:
+        lev_pill_x = (327 + 407) // 2
+    # Repaint the leverage pill bg (29,29,29) and add text
+    pill_color = (29, 29, 29)
+    if is_long:
+        x1, x2 = 327, 407
+    else:
+        x1, x2 = 336, 416
+    y1, y2 = 110 + YOFF, 169 + YOFF
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=18, fill=pill_color)
+    lev_font = _load_font(fp_r, 36)
+    draw.text((lev_pill_x, lev_pill_y), lev_text, fill=WHITE, font=lev_font, anchor="mm")
+
+    # ---- 3. Big PnL value + (% change) on the right side ----
+    color = GREEN if pnl_usdt >= 0 else RED
+    val_text = f"{pnl_usdt:+.4f}"
+    pct_text = f"({percent:+.2f}%)"
+    wipe(770, 100 + YOFF, 1245, 175 + YOFF)
+    pnl_val_font = _load_font(fp_r, 48)
+    pnl_pct_font = _load_font(fp_r, 36)
+    pct_w = draw.textlength(pct_text, font=pnl_pct_font)
+    pct_y = 142 + YOFF
+    draw.text((1235, pct_y), pct_text, fill=color, font=pnl_pct_font, anchor="rm")
+    draw.text((1235 - pct_w - 14, pct_y), val_text, fill=color, font=pnl_val_font, anchor="rm")
+
+    # ---- Common values for row A and the risk calculation ----
+    margin_v = float(data.get("amount") or 0)
+    lev_v    = float(data.get("leverage") or 0)
+    entry_v  = float(data.get("entry") or 0)
+    mark_v   = float(data.get("mark") or 0)
+    qty_u = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
+    position_usdt = qty_u * (mark_v if mark_v else entry_v)
+
+    # ---- 4. Row A values: Position USDT / Margin / Risk ----
+    val_font = _load_font(fp_r, 38)
+    rowA_y = 302
+    wipe(45, 285, 230, 325)            # Position
+    wipe(520, 285, 740, 325)           # Margin
+    wipe(1100, 285, 1245, 325)         # Risk
+    pos_text = f"{position_usdt:,.2f}".rstrip("0").rstrip(".") or "0"
+    mar_text = f"{margin_v:,.4f}"
+    # Risk: maintenance margin / margin balance × 100  (bingx-style approx)
+    mm_rate = 0.004
+    maint_margin = position_usdt * mm_rate
+    margin_balance = margin_v + pnl_usdt
+    risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
+    risk_text = f"{risk_val:.2f}%" if risk_val > 0 else "--"
+    risk_color = GREEN if 0 < risk_val < 50 else (RED if risk_val >= 70 else GREEN)
+
+    draw.text((52, rowA_y), pos_text, fill=WHITE, font=val_font, anchor="lm")
+    draw.text((529, rowA_y), mar_text, fill=WHITE, font=val_font, anchor="lm")
+    draw.text((1235, rowA_y), risk_text, fill=risk_color, font=val_font, anchor="rm")
+
+    # ---- 5. Row B values: Entry / Mark / Liquidation ----
+    rowB_y = 440
+    wipe(45, 420, 230, 460)
+    wipe(520, 420, 700, 460)
+    wipe(1080, 420, 1245, 460)
+    liq_v = float(data.get("liquidation") or 0)
+    liq_color = GREEN if (entry_v > 0 and abs(liq_v - entry_v) / entry_v > 0.05) else RED
+    draw.text((52, rowB_y), format_price(entry_v).replace(",", ","), fill=WHITE, font=val_font, anchor="lm")
+    draw.text((529, rowB_y), format_price(mark_v).replace(",", ","), fill=WHITE, font=val_font, anchor="lm")
+    draw.text((1235, rowB_y), format_price(liq_v) if liq_v > 0 else "0",
+              fill=liq_color, font=val_font, anchor="rm")
+
+    # ---- 6. Realized P/U value on the right (just below T-п/с-л row) ----
+    realized = float(data.get("realized_pnl") or 0)
+    wipe(1080, 600, 1245, 645)
+    if realized != 0:
+        rl_text = f"{realized:+.4f}"
+        rl_color = GREEN if realized > 0 else RED
+    else:
+        rl_text, rl_color = "0", GREEN
+    draw.text((1235, 622), rl_text, fill=rl_color, font=val_font, anchor="rm")
+
+    img.save(output_path)
+    _cleanup_old_files(os.path.dirname(output_path), "result_")
+    return output_path
+
+
 def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
+    if data.get("exchange") == "bingx":
+        return generate_bingx_normal_card(data, percent, pnl_usdt)
+    return _legacy_generate_trade_image(data, percent, pnl, pnl_usdt)
+
+
+def _legacy_generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
     exchange = data["exchange"]
     template_path = os.path.join(BASE_DIR, "assets", exchange, "template.png")
     output_dir = os.path.join(BASE_DIR, "output")
