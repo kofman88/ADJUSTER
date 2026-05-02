@@ -1767,60 +1767,73 @@ def generate_custom_bybit_image(data: dict) -> str:
     BG_STRIP_SUB   = (560, 635)   # below PnL, above "Цена входа"    (h=75)
     BG_STRIP_GAP   = (720, 758)   # below entry value, above exit lbl (h=38)
 
-    # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
-    # Reference uses WHITE text starting at x=133 (right edge of avatar circle);
-    # the previous GRAY at x=148 was wrong on both axes.
+    # Reference exact text positions/sizes/colours measured from
+    # Bybit_custom_*.JPG (sub-pixel verified):
+    #   chmst:    Reg 40pt, white, x=133, y_center=202
+    #   SYMBOL:   Bold 62pt, white, x=62, y_center=320
+    #   pill:     Bold 36pt, green/red text, pill bg=(27,27,27), Bold pill text size 36
+    #   PnL:      Bold 104pt, brand green/red, x=68, y_center=506
+    #   value:    Bold 46pt, white, x=62, y_center=690 / 816
+    # Brand colours sampled from the JPGs:
+    #   green = (15, 222, 140), red = (255, 50, 75) — overrides the constants above
+    GREEN = (15, 222, 140)
+    RED   = (255, 50, 75)
+
+    # ---- Username ("chmst" → custom). Avatar at x=61-128 stays.
+    # Reference: WHITE, Reg 40pt, x=133 (right edge of avatar). ----
     username = str(data.get("username", "")).strip()
     if username:
-        wipe(140, 175, 460, 222, *BG_STRIP_LOGO)
         username_font = _load_font(fp_r, 40)
+        new_w = int(draw.textlength(username, font=username_font))
+        wipe_w = max(new_w, 110) + 6
+        wipe(133, 188, 133 + wipe_w, 217, *BG_STRIP_LOGO)
         draw.text((133, 202), username, fill=WHITE, font=username_font, anchor="lm")
 
-    # ---- Symbol (e.g. SUIUSDT) + side pill (Long 50.0X / Short 50.0X) ----
+    # ---- Symbol + side pill — wipe whole row, then draw symbol then pill ----
     symbol = data["symbol"].upper()
     sym_font = _load_font(fp_b, 62)
     sym_y_center = 320
-    wipe(50, 285, 760, 355, *BG_STRIP_MID)   # source: clean strip below pill row
+    # Wipe spans symbol+pill row but stops at x=620 (well before any rocket art at this y).
+    wipe(45, 295, 620, 350, *BG_STRIP_MID)
     draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
     sym_w = draw.textlength(symbol, font=sym_font)
 
-    # Side pill — text colour green for long, red for short. Pill bg = (27,27,27)
+    # Pill — Bold 36 (185 vs ref 184 width). Pad/radius tuned for ref pill height ~50.
     pill_text_color = GREEN if is_long else RED
     leverage_num = float(str(data.get("leverage", "1")).replace("x", "").replace("X", ""))
     pill_text = ("Long" if is_long else "Short") + f" {leverage_num:.1f}X"
-    pill_font = _load_font(fp_r, 38)
-    pad_x, pad_y = 28, 8
+    pill_font = _load_font(fp_b, 36)
+    pad_x, pad_y = 26, 9
     bb = draw.textbbox((0, 0), pill_text, font=pill_font)
     pw = (bb[2] - bb[0]) + pad_x * 2
-    ph = max(53, (bb[3] - bb[1]) + pad_y * 2)
-    px = int(62 + sym_w + 32)
+    ph = max(50, (bb[3] - bb[1]) + pad_y * 2)
+    px = int(62 + sym_w + 28)
     py = sym_y_center
     draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
-                           radius=26, fill=PILL_BG)
+                           radius=ph // 2, fill=PILL_BG)
     draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font, anchor="mm")
 
     # ---- Big ROI value (+12.72% / +8.97% / -100.79% etc.) ----
+    # Reference +12.72% bbox: x=68-468 w=401. Bold size 106 + anchor x=62
+    # (accounts for SF Pro left bearing) lands at exactly the same visible x.
     pnl_text = f"{pnl:+.2f}%"
     pnl_color = GREEN if pnl >= 0 else RED
-    pnl_size = 102
+    pnl_size = 106
     pnl_font = _load_font(fp_b, pnl_size)
     while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.55) and pnl_size > 60:
         pnl_size -= 4
         pnl_font = _load_font(fp_b, pnl_size)
-    # PnL wipe must NOT cross x=555 — beyond that lies the up-arrow tip
-    # (plus_long, x=617+) or the down-arrow tip (minus_long, x=560+) which
-    # belongs to the rocket / wallet illustration.
-    wipe(45, 470, 555, 555, *BG_STRIP_SUB)
+    wipe(45, 465, 555, 550, *BG_STRIP_SUB)
     draw.text((62, 506), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
 
-    # ---- Entry / Current prices (white bold) at 46pt Semibold. Preserve user's
-    #      original input string (entry_str / exit_str) so trailing zeros stay (e.g. 3.46670). ----
+    # ---- Entry / Current prices (white bold 46pt) ----
     val_font = _load_font(fp_b, 46)
     entry_text = (data.get("entry_str") or "").strip() or format_price(data.get("entry", 0))
     exit_text  = (data.get("exit_str")  or "").strip() or format_price(data.get("exit", 0))
-    wipe(45, 663, 380, 717, *BG_STRIP_SUB)   # source: clean strip above entry row
+    # Tighter wipe matching ref value bbox (x=62-218, h≈37) plus margin.
+    wipe(45, 670, 320, 712, *BG_STRIP_SUB)
     draw.text((62, 690), entry_text, fill=WHITE, font=val_font, anchor="lm")
-    wipe(45, 790, 380, 845, *BG_STRIP_SUB)   # same clean strip
+    wipe(45, 796, 320, 838, *BG_STRIP_SUB)
     draw.text((62, 816), exit_text,  fill=WHITE, font=val_font, anchor="lm")
 
     # ---- Referral code on the white footer band — replace just the value ----
