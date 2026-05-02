@@ -33,15 +33,15 @@ FONTS = {
             "badge": 26,
             "badge_text_offset_y": -2,
 
-            # Semibold шире → pad_x=8 даёт Лонг(130+16=146px), pad_y=9 + min_h=70
-            "badge_pad_green_x": 8,
-            "badge_pad_green_y": 9,
-            "badge_min_green_w": 100,
+            # Roomy padding so "Лонг"/"Шорт" sit comfortably inside the pill
+            "badge_pad_green_x": 18,
+            "badge_pad_green_y": 12,
+            "badge_min_green_w": 160,
             "badge_min_green_h": 70,
 
-            "badge_pad_red_x": 8,
-            "badge_pad_red_y": 9,
-            "badge_min_red_w": 100,
+            "badge_pad_red_x": 18,
+            "badge_pad_red_y": 12,
+            "badge_min_red_w": 160,
             "badge_min_red_h": 70,
            
 

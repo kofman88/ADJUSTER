@@ -1041,15 +1041,18 @@ def draw_gray_box(draw, x, y, text, font, cfg):
     padding_x = cfg.get("pad_x", 16)
     padding_y = cfg.get("pad_y", 10)
     min_h = cfg.get("min_h", 0)
+    min_w = cfg.get("min_w", 0)
     radius = cfg.get("radius", 14)
     bbox = draw.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     box_h = max(min_h, h + padding_y * 2)
-    # Цвет заливки из BingX template.png: (18, 18, 18)
+    box_w = max(min_w, w + padding_x * 2)
+    # Pill colour from new BingX UI ≈ (35,35,38) — clearly visible on dark bg
+    fill = cfg.get("fill", (35, 35, 38))
     draw.rounded_rectangle(
-        (x - w // 2 - padding_x, y - box_h // 2,
-         x + w // 2 + padding_x, y + box_h // 2),
-        radius=radius, fill=(18, 18, 18),
+        (x - box_w // 2, y - box_h // 2,
+         x + box_w // 2, y + box_h // 2),
+        radius=radius, fill=fill,
     )
     draw.text((x, y), text, fill=(255, 255, 255), font=font, anchor="mm")
 

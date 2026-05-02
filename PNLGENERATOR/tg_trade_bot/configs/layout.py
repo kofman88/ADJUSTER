@@ -53,14 +53,15 @@ LAYOUT = {
             "anchor": "rm",
         },
 
-        # Серые боксы Кросс / 20x (Semibold: Кросс tw=164 pad_x=3→170px; 50X tw=108 pad_x=7→122px)
+        # Pills: Кросс/NX with comfy padding so they read as clearly grey-filled
+        # capsules (matching the new BingX UI references).
         "margin_mode": {
-            "x": 0.22, "y": 0.202,
-            "pad_x": 3, "pad_y": 9, "min_h": 70, "radius": 14,
+            "x": 0.235, "y": 0.202,
+            "pad_x": 18, "pad_y": 12, "min_h": 70, "min_w": 170, "radius": 18,
         },
         "leverage_bingx": {
-            "x": 0.33, "y": 0.202,
-            "pad_x": 7, "pad_y": 9, "min_h": 70, "radius": 14,
+            "x": 0.36, "y": 0.202,
+            "pad_x": 18, "pad_y": 12, "min_h": 70, "min_w": 110, "radius": 18,
         },
 
         # Очистка
