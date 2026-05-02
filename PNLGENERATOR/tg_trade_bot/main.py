@@ -1584,7 +1584,7 @@ def generate_custom_bybit_image(data: dict) -> str:
     GREEN = (0, 208, 132)
     RED   = (255, 59, 92)
     GRAY  = (140, 150, 172)
-    PILL_BG = (45, 45, 45)
+    PILL_BG = (27, 27, 27)
     BLACK = (0, 0, 0)
 
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
@@ -1597,55 +1597,53 @@ def generate_custom_bybit_image(data: dict) -> str:
     username = str(data.get("username", "")).strip()
     if username:
         wipe(140, 175, 700, 222)
-        username_font = _load_font(fp_r, 38)
-        draw.text((148, 197), username, fill=GRAY, font=username_font, anchor="lm")
+        username_font = _load_font(fp_r, 40)
+        draw.text((148, 202), username, fill=GRAY, font=username_font, anchor="lm")
 
     # ---- Symbol (e.g. SUIUSDT) + side pill (Long 50.0X / Short 50.0X) ----
     symbol = data["symbol"].upper()
-    sym_font = _load_font(fp_b, 60)
+    sym_font = _load_font(fp_b, 62)
     sym_y_center = 320
     # Wipe the entire symbol+pill strip
     wipe(50, 285, 800, 355)
     draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
     sym_w = draw.textlength(symbol, font=sym_font)
 
-    # Side pill — text colour green for long, red for short (same as the original
-    # Bybit share card's pill behaviour)
+    # Side pill — text colour green for long, red for short. Pill bg = (27,27,27)
     pill_text_color = GREEN if is_long else RED
     leverage_num = float(str(data.get("leverage", "1")).replace("x", "").replace("X", ""))
     pill_text = ("Long" if is_long else "Short") + f" {leverage_num:.1f}X"
-    pill_font = _load_font(fp_r, 32)
-    pad_x, pad_y = 24, 14
+    pill_font = _load_font(fp_r, 38)
+    pad_x, pad_y = 28, 8
     bb = draw.textbbox((0, 0), pill_text, font=pill_font)
     pw = (bb[2] - bb[0]) + pad_x * 2
-    ph = (bb[3] - bb[1]) + pad_y * 2
-    px = int(62 + sym_w + 22)
+    ph = max(53, (bb[3] - bb[1]) + pad_y * 2)
+    px = int(62 + sym_w + 32)
     py = sym_y_center
     draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
-                           radius=18, fill=PILL_BG)
+                           radius=26, fill=PILL_BG)
     draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font, anchor="mm")
 
     # ---- Big ROI value (+12.72% / +8.97% / -100.79% etc.) ----
     pnl_text = f"{pnl:+.2f}%"
     pnl_color = GREEN if pnl >= 0 else RED
-    # Allow the value to span up to ~75% of the canvas width before shrinking
-    pnl_size = 100
+    pnl_size = 102
     pnl_font = _load_font(fp_b, pnl_size)
-    while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.75) and pnl_size > 60:
+    while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.78) and pnl_size > 60:
         pnl_size -= 4
         pnl_font = _load_font(fp_b, pnl_size)
     wipe(45, 455, 760, 560)
     draw.text((62, 506), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
 
-    # ---- Entry / Current prices (white bold). Preserve user's original
-    #      input string (entry_str / exit_str) so trailing zeros stay (e.g. 3.46670). ----
-    val_font = _load_font(fp_b, 50)
+    # ---- Entry / Current prices (white bold) at 46pt Semibold. Preserve user's
+    #      original input string (entry_str / exit_str) so trailing zeros stay (e.g. 3.46670). ----
+    val_font = _load_font(fp_b, 46)
     entry_text = (data.get("entry_str") or "").strip() or format_price(data.get("entry", 0))
     exit_text  = (data.get("exit_str")  or "").strip() or format_price(data.get("exit", 0))
     wipe(45, 660, 380, 720)
     draw.text((62, 690), entry_text, fill=WHITE, font=val_font, anchor="lm")
     wipe(45, 790, 380, 850)
-    draw.text((62, 820), exit_text,  fill=WHITE, font=val_font, anchor="lm")
+    draw.text((62, 816), exit_text,  fill=WHITE, font=val_font, anchor="lm")
 
     # ---- Referral code on the white footer band — replace just the value ----
     referral_code = str(data.get("referral", "")).strip()
