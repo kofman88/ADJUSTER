@@ -1199,7 +1199,11 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
 
     symbol_text = data["symbol"]
     badge_text = "Лонг" if data["side"] == "long" else "Шорт"
-    pnl_text = f"{pnl_usdt:+.2f}({pnl:+.2f}%)"
+    if exchange == "bingx":
+        # BingX UI: full 4-decimal precision and a space before the bracketed pct
+        pnl_text = f"{pnl_usdt:+.4f} ({pnl:+.2f}%)"
+    else:
+        pnl_text = f"{pnl_usdt:+.2f}({pnl:+.2f}%)"
     lev_text = f"Кросс {data['leverage']}x" if exchange == "bybit" else ""
 
     sx, sy = pos(layout["symbol"])
@@ -1224,7 +1228,7 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         mx, my = pos(layout["margin_mode"])
         lbx, lby = pos(layout["leverage_bingx"])
         draw_gray_box(draw, mx, my, "Кросс", badge_font, layout["margin_mode"])
-        draw_gray_box(draw, lbx, lby, f"{data['leverage']}x", badge_font, layout["leverage_bingx"])
+        draw_gray_box(draw, lbx, lby, f"{data['leverage']}X", badge_font, layout["leverage_bingx"])
         draw_bingx_icon(img, data["symbol"], layout, symbol_font, w, h)
 
         
@@ -1234,11 +1238,14 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
         qty_value = float(data.get("qty") or 0)
         qty_text = format_qty(qty_value)
     else:  # bingx
-        # BingX: маржа * плечо (позиция в USDT)
-        margin = float(data.get("amount") or 0)
-        lev = float(data.get("leverage") or 0)
-        qty_value = margin * lev
-        qty_text = format_qty(qty_value)
+        # BingX UI shows current notional: qty × mark price (not entry-based notional)
+        margin_v = float(data.get("amount") or 0)
+        lev_v = float(data.get("leverage") or 0)
+        entry_v = float(data.get("entry") or 0)
+        mark_v = float(data.get("mark") or 0)
+        qty_unrounded = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
+        qty_value = qty_unrounded * (mark_v if mark_v else entry_v)
+        qty_text = f"{qty_value:,.2f}"
 
     # рисуем qty для ОБЕИХ бирж
     draw_text(
@@ -1294,19 +1301,32 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
     precision = data.get("price_precision")
 
     if exchange == "bingx":
-        margin_usdt = float(data.get("amount") or 0) * float(data.get("leverage") or 0)
-        draw_text(draw, layout, "margin", f"{data['amount']:.2f}", font_regular, sizes["qty"], WHITE, w, h)
+        # BingX-style margin: thousands comma + 4 decimals (e.g. "1,713.2700")
+        margin_disp = f"{float(data['amount']):,.4f}"
+        draw_text(draw, layout, "margin", margin_disp, font_regular, sizes["qty"], WHITE, w, h)
         draw_text(draw, layout, "entry", format_price(data["entry"], precision), font_regular, sizes["entry"], WHITE, w, h)
         draw_text(draw, layout, "mark", format_price(data["mark"], precision), font_regular, sizes["mark"], WHITE, w, h)
-        draw_text(draw, layout, "liq", format_price(data["liquidation"], precision), font_regular, sizes["liq"], ORANGE, w, h)
+        # Liquidation in green when far from entry (safe), orange when close
+        entry_v = float(data.get("entry") or 0)
+        liq_v   = float(data.get("liquidation") or 0)
+        liq_color = GREEN if (entry_v > 0 and abs(liq_v - entry_v) / entry_v > 0.05) else ORANGE
+        draw_text(draw, layout, "liq", format_price(liq_v, precision), font_regular, sizes["liq"], liq_color, w, h)
 
     if exchange == "bingx" and "risk" in layout:
-        entry_v = float(data.get("entry") or 0)
-        qty_v = float(data.get("qty") or 0)
+        # BingX "Риск" = Margin Ratio = maintenance_margin / margin_balance × 100
+        # mm rate ≈ 0.4% of position notional for major coins
         margin_v = float(data.get("amount") or 0)
-        pos_margin = entry_v * qty_v
-        if pos_margin and margin_v:
-            risk = margin_v / pos_margin * 100.0
+        lev_v    = float(data.get("leverage") or 0)
+        entry_v  = float(data.get("entry") or 0)
+        mark_v   = float(data.get("mark") or 0)
+        qty_u = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
+        position = qty_u * (mark_v if mark_v else entry_v)
+        is_long_local = data.get("side") == "long"
+        raw_pnl = (qty_u * (mark_v - entry_v)) if is_long_local else (qty_u * (entry_v - mark_v))
+        maint_margin = position * 0.004
+        margin_balance = margin_v + raw_pnl
+        if margin_balance > 0 and position > 0:
+            risk = maint_margin / margin_balance * 100.0
             risk_text = f"{risk:.2f}%" if round(risk, 2) != 0 else "--"
             risk_color = GREEN if risk <= 40 else (ORANGE if risk <= 70 else RED)
         else:
