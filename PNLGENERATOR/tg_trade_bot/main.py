@@ -1768,11 +1768,13 @@ def generate_custom_bybit_image(data: dict) -> str:
     BG_STRIP_GAP   = (720, 758)   # below entry value, above exit lbl (h=38)
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
+    # Reference uses WHITE text starting at x=133 (right edge of avatar circle);
+    # the previous GRAY at x=148 was wrong on both axes.
     username = str(data.get("username", "")).strip()
     if username:
-        wipe(140, 175, 700, 222, *BG_STRIP_LOGO)
+        wipe(140, 175, 460, 222, *BG_STRIP_LOGO)
         username_font = _load_font(fp_r, 40)
-        draw.text((148, 202), username, fill=GRAY, font=username_font, anchor="lm")
+        draw.text((133, 202), username, fill=WHITE, font=username_font, anchor="lm")
 
     # ---- Symbol (e.g. SUIUSDT) + side pill (Long 50.0X / Short 50.0X) ----
     symbol = data["symbol"].upper()
@@ -1802,10 +1804,13 @@ def generate_custom_bybit_image(data: dict) -> str:
     pnl_color = GREEN if pnl >= 0 else RED
     pnl_size = 102
     pnl_font = _load_font(fp_b, pnl_size)
-    while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.78) and pnl_size > 60:
+    while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.55) and pnl_size > 60:
         pnl_size -= 4
         pnl_font = _load_font(fp_b, pnl_size)
-    wipe(45, 470, 760, 555, *BG_STRIP_SUB)   # 75px source tiled to 85
+    # PnL wipe must NOT cross x=555 — beyond that lies the up-arrow tip
+    # (plus_long, x=617+) or the down-arrow tip (minus_long, x=560+) which
+    # belongs to the rocket / wallet illustration.
+    wipe(45, 470, 555, 555, *BG_STRIP_SUB)
     draw.text((62, 506), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
 
     # ---- Entry / Current prices (white bold) at 46pt Semibold. Preserve user's
