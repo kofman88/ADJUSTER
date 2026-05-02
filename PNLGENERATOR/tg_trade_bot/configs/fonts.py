@@ -20,7 +20,7 @@ FONTS = {
         "files": {
             "regular": "fonts/SF_Pro_Display_Regular.otf",
             "bold": "fonts/SF_Pro_Display_Semibold.otf",
-            "badge": "fonts/SF_Pro_Display_Semibold.otf",  # бейджи жирнее как в оригинале
+            "badge": "fonts/SF_Pro_Display_Regular.otf",  # match user's reference (medium weight)
         },
         "sizes": {
             "symbol": 54,
