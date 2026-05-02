@@ -1734,21 +1734,43 @@ def generate_custom_bybit_image(data: dict) -> str:
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    # Sample the actual dark background colour from a guaranteed-clean spot
-    # (between BYBIT logo and chmst row). The Bybit reference has a faint
-    # chart-grid pattern over near-black; flat-fill with this sampled colour
-    # is much closer than the previous hard-coded (20,20,20).
-    bybit_bg = img.getpixel((30, 130))
+    def wipe(x1, y1, x2, y2, src_y0=None, src_y1=None):
+        """Cover (x1..x2, y1..y2) with a vertical-strip copy from (x1..x2,
+        src_y0..src_y1). Tiles vertically if the source is shorter than the
+        zone — preserves the chart-grid texture in the Bybit reference instead
+        of leaving a flat-fill rectangle.
 
-    def wipe(x1, y1, x2, y2, fill=None):
-        if fill is None:
-            fill = bybit_bg
-        draw.rectangle([x1, y1, x2, y2], fill=fill)
+        The default source is the strip immediately above the zone."""
+        zone_h = y2 - y1
+        if src_y0 is None:
+            src_y1_eff = y1 - 4
+            src_y0 = max(0, src_y1_eff - zone_h)
+            src_y1 = src_y1_eff
+        elif src_y1 is None:
+            src_y1 = src_y0 + zone_h
+        src_h = src_y1 - src_y0
+        if src_h <= 0:
+            return
+        strip = img.crop((x1, src_y0, x2, src_y1))
+        cur_y = y1
+        while cur_y < y2:
+            paint_h = min(src_h, y2 - cur_y)
+            sub = strip if paint_h == src_h else strip.crop((0, 0, strip.width, paint_h))
+            img.paste(sub, (x1, cur_y))
+            cur_y += paint_h
+
+    # Pre-compute clean source y-ranges (per Bybit reference layout).
+    # All these spans are guaranteed clear of text and illustrations.
+    BG_STRIP_LOGO  = (120, 175)   # below BYBIT logo, above chmst   (h=55)
+    BG_STRIP_PRE   = (224, 280)   # below chmst, above symbol+pill   (h=56)
+    BG_STRIP_MID   = (355, 410)   # below symbol+pill, above ROI     (h=55)
+    BG_STRIP_SUB   = (560, 635)   # below PnL, above "Цена входа"    (h=75)
+    BG_STRIP_GAP   = (720, 758)   # below entry value, above exit lbl (h=38)
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
     username = str(data.get("username", "")).strip()
     if username:
-        wipe(140, 175, 700, 222)
+        wipe(140, 175, 700, 222, *BG_STRIP_LOGO)
         username_font = _load_font(fp_r, 40)
         draw.text((148, 202), username, fill=GRAY, font=username_font, anchor="lm")
 
@@ -1756,8 +1778,7 @@ def generate_custom_bybit_image(data: dict) -> str:
     symbol = data["symbol"].upper()
     sym_font = _load_font(fp_b, 62)
     sym_y_center = 320
-    # Tight wipe — only as wide as the symbol+pill actually need
-    wipe(50, 285, 760, 355)
+    wipe(50, 285, 760, 355, *BG_STRIP_MID)   # source: clean strip below pill row
     draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
     sym_w = draw.textlength(symbol, font=sym_font)
 
@@ -1784,9 +1805,7 @@ def generate_custom_bybit_image(data: dict) -> str:
     while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.78) and pnl_size > 60:
         pnl_size -= 4
         pnl_font = _load_font(fp_b, pnl_size)
-    # Tight wipe over PnL band only — don't bleed into "ROI" label above (y<470)
-    # or "Цена входа" label below (y>635)
-    wipe(45, 470, 760, 555)
+    wipe(45, 470, 760, 555, *BG_STRIP_SUB)   # 75px source tiled to 85
     draw.text((62, 506), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
 
     # ---- Entry / Current prices (white bold) at 46pt Semibold. Preserve user's
@@ -1794,9 +1813,9 @@ def generate_custom_bybit_image(data: dict) -> str:
     val_font = _load_font(fp_b, 46)
     entry_text = (data.get("entry_str") or "").strip() or format_price(data.get("entry", 0))
     exit_text  = (data.get("exit_str")  or "").strip() or format_price(data.get("exit", 0))
-    wipe(45, 663, 380, 717)
+    wipe(45, 663, 380, 717, *BG_STRIP_SUB)   # source: clean strip above entry row
     draw.text((62, 690), entry_text, fill=WHITE, font=val_font, anchor="lm")
-    wipe(45, 790, 380, 845)
+    wipe(45, 790, 380, 845, *BG_STRIP_SUB)   # same clean strip
     draw.text((62, 816), exit_text,  fill=WHITE, font=val_font, anchor="lm")
 
     # ---- Referral code on the white footer band — replace just the value ----
