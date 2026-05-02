@@ -107,6 +107,9 @@ class TradeForm(StatesGroup):
     amount = State()
     deposit = State()
     leverage = State()
+    wallet_balance = State()
+    risk_percent = State()
+    realized_pnl = State()
 
 class MarathonStatesGroup(StatesGroup):
     start_deposit = State()
@@ -793,8 +796,114 @@ async def get_leverage(message: Message, state: FSMContext):
     data.update(leverage=leverage, qty=qty, liquidation=liquidation, cost=cost)
     if message.from_user.username:
         data["telegram_username"] = message.from_user.username
+    await state.update_data(**data)
 
-    # Check daily limit for non-premium users
+    # BingX cards have two extra optional fields the bot didn't ask before:
+    # wallet balance (drives cross-margin liquidation + risk %) and realized PnL
+    # (commissions / funding shown on the card). Skipping falls back to formula.
+    if data["exchange"] == "bingx":
+        await show_step(
+            message,
+            state,
+            "Баланс кошелька (USDT) — для расчёта риска и ликвидации.",
+            skip_kb,
+        )
+        await state.set_state(TradeForm.wallet_balance)
+        return
+
+    await _render_trade_card(message, state, data, percent, pnl_usdt, marathon)
+
+
+async def _ask_risk_percent(target_msg: Message, state: FSMContext):
+    await show_step(target_msg, state,
+                    "Риск % (например 2.04). Пропусти — посчитаю по формуле.",
+                    skip_kb)
+    await state.set_state(TradeForm.risk_percent)
+
+
+async def _ask_realized_pnl(target_msg: Message, state: FSMContext):
+    await show_step(target_msg, state,
+                    "Реализованная П/У (USDT), напр. -2.5429.",
+                    skip_kb)
+    await state.set_state(TradeForm.realized_pnl)
+
+
+@dp.callback_query(TradeForm.wallet_balance, F.data == "skip_field")
+async def skip_wallet_balance(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
+    await _ask_risk_percent(call.message, state)
+
+
+@dp.message(TradeForm.wallet_balance)
+async def get_wallet_balance(message: Message, state: FSMContext):
+    value = await parse_float(message)
+    if value is None:
+        return
+    await state.update_data(wallet_balance=value)
+    await safe_delete_message(message)
+    await _ask_risk_percent(message, state)
+
+
+@dp.callback_query(TradeForm.risk_percent, F.data == "skip_field")
+async def skip_risk_percent(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
+    await _ask_realized_pnl(call.message, state)
+
+
+@dp.message(TradeForm.risk_percent)
+async def get_risk_percent(message: Message, state: FSMContext):
+    try:
+        value = float(message.text.replace(",", ".").replace("%", ""))
+    except (ValueError, AttributeError):
+        await message.answer("Введите число (например 2.04) или нажми пропустить")
+        return
+    await state.update_data(risk_percent=value)
+    await safe_delete_message(message)
+    await _ask_realized_pnl(message, state)
+
+
+@dp.callback_query(TradeForm.realized_pnl, F.data == "skip_field")
+async def skip_realized_pnl(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
+    await _finalize_bingx_card(call.message, state)
+
+
+@dp.message(TradeForm.realized_pnl)
+async def get_realized_pnl(message: Message, state: FSMContext):
+    try:
+        value = float(message.text.replace(",", "."))
+    except (ValueError, AttributeError):
+        await message.answer("Введите число (например -2.5429) или нажми пропустить")
+        return
+    await state.update_data(realized_pnl=value)
+    await safe_delete_message(message)
+    await _finalize_bingx_card(message, state)
+
+
+async def _finalize_bingx_card(message: Message, state: FSMContext):
+    data = await state.get_data()
+    user_id = message.from_user.id
+    marathon = MARATHON.get(user_id)
+    pnl_usdt, _, percent = calculate_pnl_linear(
+        data["entry"], data["mark"], data["qty"], data["side"], data["leverage"]
+    )
+    await _render_trade_card(message, state, data, percent, pnl_usdt, marathon)
+
+
+async def _render_trade_card(message: Message, state: FSMContext, data: dict,
+                              percent: float, pnl_usdt: float, marathon: dict | None):
     has_access, _ = check_access(message.from_user.id)
     if not has_access:
         can_use, remaining = check_daily_limit(message.from_user.id)
@@ -807,14 +916,12 @@ async def get_leverage(message: Message, state: FSMContext):
             await state.clear()
             return
 
-    # PIL-рендеринг в пуле потоков
     loop = asyncio.get_event_loop()
     try:
         path = await loop.run_in_executor(
             _THREAD_POOL, generate_trade_image, data, percent, percent, pnl_usdt
         )
         await message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
-        # Increment usage for free users
         has_access, _ = check_access(message.from_user.id)
         if not has_access:
             increment_usage(message.from_user.id)
@@ -1297,12 +1404,22 @@ def generate_bingx_trade_card(data: dict, percent: float, pnl: float, pnl_usdt: 
         _draw_dotted(draw, x0, rowA_lbl_y + 26, x1, rowA_lbl_y + 26, GRAY_D, dot=2, gap=4)
 
     # Values for row A
-    # Margin Ratio (Риск) ≈ maintenance_margin / (margin + unrealized_pnl) × 100.
-    # BingX maintenance margin tier ≈ 0.4% of position notional for major coins.
-    mm_rate = 0.004
+    # Margin Ratio (Риск): in BingX cross-margin this is computed against the
+    # whole wallet balance. If the user supplied wallet_balance we use it
+    # exactly; otherwise we fall back to a rough formula based on margin only.
+    mm_rate = 0.004  # BingX maintenance margin tier (~0.4% for major coins)
     maint_margin = position_usdt * mm_rate
-    margin_balance = margin_val + raw_pnl_usdt
-    risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
+    wallet_balance = float(data.get("wallet_balance") or 0)
+    if wallet_balance > 0:
+        margin_balance = wallet_balance + raw_pnl_usdt
+    else:
+        margin_balance = margin_val + raw_pnl_usdt
+    # User can override risk to copy the exact value from BingX UI
+    risk_override = data.get("risk_percent")
+    if risk_override is not None:
+        risk_val = float(risk_override)
+    else:
+        risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
 
     pos_text = format_position_usdt(position_usdt)
     mar_text = f"{margin_val:,.4f}"
@@ -1330,7 +1447,15 @@ def generate_bingx_trade_card(data: dict, percent: float, pnl: float, pnl_usdt: 
     precision = data.get("price_precision")
     entry_text = format_price(entry_val, precision)
     mark_text  = format_price(mark_val,  precision)
-    liq_val    = float(data.get("liquidation") or 0)
+    # Cross-margin liquidation: at liquidation margin_balance == maint_margin,
+    # so liq_price = entry ± (wallet_balance - maint_margin) / qty.
+    if wallet_balance > 0 and qty_unrounded > 0:
+        delta = (wallet_balance - maint_margin) / qty_unrounded
+        liq_val = (entry_val - delta) if is_long else (entry_val + delta)
+        if liq_val < 0:
+            liq_val = 0.0
+    else:
+        liq_val = float(data.get("liquidation") or 0)
     liq_text   = format_price(liq_val, precision) if liq_val > 0 else "0"
 
     draw.text((col_x[0], rowB_val_y), entry_text, fill=WHITE, font=f_value, anchor="lm")
@@ -1376,8 +1501,12 @@ def generate_bingx_trade_card(data: dict, percent: float, pnl: float, pnl_usdt: 
     _draw_dotted(draw, PAD_L, rl_y + 26, PAD_L + rl_lw, rl_y + 26, GRAY_D, dot=2, gap=4)
     # Realized PnL value: 0 by default unless user provided one
     realized_val = float(data.get("realized_pnl") or 0)
-    rl_val_text = f"{realized_val:+.4f}" if realized_val != 0 else "0"
-    rl_color = GREEN if realized_val >= 0 else RED
+    if realized_val == 0:
+        rl_val_text = "0"
+        rl_color = GREEN
+    else:
+        rl_val_text = f"{realized_val:+.4f}"
+        rl_color = GREEN if realized_val >= 0 else RED
     draw.text((RIGHT, rl_y), rl_val_text, fill=rl_color, font=f_realized_v, anchor="rm")
 
     # ============ BUTTONS ROW ============
