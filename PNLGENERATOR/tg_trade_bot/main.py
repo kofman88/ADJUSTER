@@ -563,20 +563,21 @@ _REF_TEST_CASES = {
     # Bybit share cards — match Bybit_custom_<plus|minus>PNL_<LONG|SHORT>.JPG
     "bybit_plus_long": dict(
         render="bybit_share",
+        # Baked reference uses "Текущая цена" → status="open" matches the asset
         data={"username":"chmst","symbol":"WIFUSDT","pnl":12.72,"entry":0.9058,"exit":0.9074,
-              "leverage":"75x","side":"long","referral":"PGKDGV","status":"closed"},
+              "leverage":"75x","side":"long","referral":"PGKDGV","status":"open"},
     ),
     "bybit_plus_short": dict(
         render="bybit_share",
         data={"username":"chmst","symbol":"SUIUSDT","pnl":8.97,"entry":3.4667,"exit":3.4003,
               "entry_str":"3.46670","exit_str":"3.40030",
-              "leverage":"50x","side":"short","referral":"POKOIV","status":"closed"},
+              "leverage":"50x","side":"short","referral":"POKOIV","status":"open"},
     ),
     "bybit_minus_long": dict(
         render="bybit_share",
         data={"username":"chmst","symbol":"WLDUSDT","pnl":-100.79,"entry":0.9869,"exit":0.9665,
               "entry_str":"0.9869","exit_str":"0.9665",
-              "leverage":"50x","side":"long","referral":"PGKDGV","status":"closed"},
+              "leverage":"50x","side":"long","referral":"PGKDGV","status":"open"},
     ),
     # BingX normal UI — match NORMAL_BINGX_<LONG|SHORT>.jpg
     "bingx_normal_long": dict(
@@ -1804,9 +1805,10 @@ def generate_custom_bybit_image(data: dict) -> str:
     sym_w = draw.textlength(symbol, font=sym_font)
 
     # Pill — Bold 36 (185 vs ref 184 width). Pad/radius tuned for ref pill height ~50.
+    # User's references use Russian "Лонг"/"Шорт" instead of English Long/Short.
     pill_text_color = GREEN if is_long else RED
     leverage_num = float(str(data.get("leverage", "1")).replace("x", "").replace("X", ""))
-    pill_text = ("Long" if is_long else "Short") + f" {leverage_num:.1f}X"
+    pill_text = ("Лонг" if is_long else "Шорт") + f" {leverage_num:.1f}X"
     pill_font = _load_font(fp_b, 36)
     pad_x, pad_y = 26, 9
     bb = draw.textbbox((0, 0), pill_text, font=pill_font)
@@ -1816,7 +1818,11 @@ def generate_custom_bybit_image(data: dict) -> str:
     py = sym_y_center
     draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
                            radius=ph // 2, fill=PILL_BG)
-    draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font, anchor="mm")
+    # stroke_width=1 thickens the glyph stroke by one pixel — keeps the pill text
+    # readable / un-translucent after Telegram re-encodes the PNG as JPG
+    # (fixes "оно чуть просвечивает" complaint).
+    draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font,
+              anchor="mm", stroke_width=1, stroke_fill=pill_text_color)
 
     # ---- Big ROI value (+12.72% / +8.97% / -100.79% etc.) ----
     # Reference +12.72% bbox: x=68-468 w=401. Bold size 106 + anchor x=62
@@ -1840,6 +1846,15 @@ def generate_custom_bybit_image(data: dict) -> str:
     draw.text((62, 690), entry_text, fill=WHITE, font=val_font, anchor="lm")
     wipe(45, 796, 320, 838, *BG_STRIP_SUB)
     draw.text((62, 816), exit_text,  fill=WHITE, font=val_font, anchor="lm")
+
+    # ---- Second price label: "Цена выхода" (closed) vs baked "Текущая цена" (open) ----
+    # The base reference JPG always has "Текущая цена" baked in. For closed trades
+    # the user expects "Цена выхода" — overwrite the label.
+    if data.get("status") == "closed":
+        # Reference label bbox: y=759-776, x≈62-260. Wipe the row and redraw.
+        wipe(45, 752, 340, 783, *BG_STRIP_SUB)
+        label_font = _load_font(fp_r, 32)
+        draw.text((62, 768), "Цена выхода", fill=GRAY, font=label_font, anchor="lm")
 
     # ---- Referral code on the white footer band — replace just the value ----
     referral_code = str(data.get("referral", "")).strip()
