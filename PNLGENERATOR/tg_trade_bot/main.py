@@ -1152,7 +1152,186 @@ def draw_bingx_icon(
     img.paste(icon, (x, y), icon)
 
 
+def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> str:
+    """BingX position card rendered ON TOP of the user's actual reference
+    screenshots (NORMAL_BINGX_LONG.jpg / NORMAL_BINGX_SHORT.jpg, 1290x~800).
+    Only the dynamic values are wiped and re-drawn — every static element
+    (background, pills, labels, buttons, refresh icon, candle icon) keeps
+    its original BingX styling pixel-for-pixel.
+    """
+    side = data["side"]
+    is_long = side == "long"
+    template_name = "NORMAL_BINGX_LONG.jpg" if is_long else "NORMAL_BINGX_SHORT.jpg"
+    template_path = os.path.join(BASE_DIR, "assets", "bingx", template_name)
+    if not os.path.exists(template_path):
+        # Fallback to old template if user hasn't uploaded references
+        return _legacy_generate_trade_image(data, percent, percent, pnl_usdt)
+
+    output_dir = os.path.join(BASE_DIR, "output")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"result_{uuid.uuid4().hex[:8]}.png")
+
+    img = _load_template(template_path).copy()
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    draw = ImageDraw.Draw(img)
+    W, H = img.size
+
+    BG    = (10, 10, 10)
+    WHITE = (255, 255, 255)
+    GREEN = (44, 196, 134)
+    RED   = (245, 80, 95)
+    GREY  = (138, 144, 158)
+
+    fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
+    fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
+
+    # Per-template y offset (LONG sits ~15px higher) and candle-icon left edge
+    if is_long:
+        YOFF = -15
+        candle_icon_x = 370   # candle icon starts here on LONG (after GIGGLEUSDT)
+    else:
+        YOFF = 0
+        candle_icon_x = 290   # candle icon starts here on SHORT (after ETHUSDT)
+
+    def wipe(x1, y1, x2, y2):
+        draw.rectangle([x1, y1, x2, y2], fill=BG)
+
+    # ---- 1. Symbol (ETHUSDT / GIGGLEUSDT / …) + candle icon next to it ----
+    # In the real BingX UI the icon FOLLOWS the symbol, so we wipe the entire
+    # symbol+icon strip and re-draw the symbol followed by the candle icon
+    # extracted from the original screenshot.
+    symbol = data["symbol"].upper()
+    sym_y_center = 67 + YOFF
+    sym_font = _load_font(fp_b, 46)
+    # Wipe everything across the symbol/icon strip (well past where any symbol
+    # could end on either base template).
+    wipe(45, 40 + YOFF, 430, 100 + YOFF)
+    draw.text((52, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
+    # Paste candle icon ~24px after the symbol's right edge
+    sym_w = draw.textlength(symbol, font=sym_font)
+    icon_path = os.path.join(BASE_DIR, "assets", "bingx", "candle_icon.png")
+    if os.path.exists(icon_path):
+        icon = Image.open(icon_path).convert("RGBA")
+        ix = int(52 + sym_w + 24)
+        iy = sym_y_center - icon.height // 2
+        img.paste(icon, (ix, iy), icon)
+        draw = ImageDraw.Draw(img)
+
+    # ---- 2. Leverage pill text (e.g. "5X") — wipe and rewrite to match user's leverage ----
+    lev_int = int(float(str(data["leverage"]).replace("x", "").replace("X", "")))
+    lev_text = f"{lev_int}X"
+    lev_pill_y = (110 + 169) // 2 + YOFF
+    lev_pill_x = (336 + 416) // 2  # short pill bounds
+    if is_long:
+        lev_pill_x = (327 + 407) // 2
+    # Repaint the leverage pill bg (29,29,29) and add text
+    pill_color = (29, 29, 29)
+    if is_long:
+        x1, x2 = 327, 407
+    else:
+        x1, x2 = 336, 416
+    y1, y2 = 110 + YOFF, 169 + YOFF
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=18, fill=pill_color)
+    lev_font = _load_font(fp_r, 36)
+    draw.text((lev_pill_x, lev_pill_y), lev_text, fill=WHITE, font=lev_font, anchor="mm")
+
+    # ---- 3. Big PnL value + (% change) on the right side ----
+    color = GREEN if pnl_usdt >= 0 else RED
+    val_text = f"{pnl_usdt:+.4f}"
+    pct_text = f"({percent:+.2f}%)"
+    wipe(770, 100 + YOFF, 1245, 175 + YOFF)
+    pnl_val_font = _load_font(fp_r, 48)
+    pnl_pct_font = _load_font(fp_r, 36)
+    pct_w = draw.textlength(pct_text, font=pnl_pct_font)
+    pct_y = 142 + YOFF
+    draw.text((1235, pct_y), pct_text, fill=color, font=pnl_pct_font, anchor="rm")
+    draw.text((1235 - pct_w - 14, pct_y), val_text, fill=color, font=pnl_val_font, anchor="rm")
+
+    # ---- Common values for row A and the risk calculation ----
+    margin_v = float(data.get("amount") or 0)
+    lev_v    = float(data.get("leverage") or 0)
+    entry_v  = float(data.get("entry") or 0)
+    mark_v   = float(data.get("mark") or 0)
+    qty_u = (margin_v * lev_v / entry_v) if entry_v > 0 else 0.0
+    position_usdt = qty_u * (mark_v if mark_v else entry_v)
+
+    # ---- 4. Row A values: Position USDT / Margin / Risk ----
+    val_font = _load_font(fp_r, 38)
+    rowA_y = 302 + YOFF
+    # Wider wipes to fully erase any value the base template carries
+    wipe(45,  rowA_y - 22,  340, rowA_y + 22)   # Position
+    wipe(520, rowA_y - 22,  860, rowA_y + 22)   # Margin
+    wipe(1080, rowA_y - 22, 1250, rowA_y + 22)  # Risk
+    pos_text = f"{position_usdt:,.2f}".rstrip("0").rstrip(".") or "0"
+    mar_text = f"{margin_v:,.4f}"
+    # Risk: maintenance margin / margin balance × 100  (bingx-style approx)
+    mm_rate = 0.004
+    maint_margin = position_usdt * mm_rate
+    margin_balance = margin_v + pnl_usdt
+    risk_val = (maint_margin / margin_balance * 100) if margin_balance > 0 else 0.0
+    risk_text = f"{risk_val:.2f}%" if risk_val > 0 else "--"
+    risk_color = GREEN if 0 < risk_val < 50 else (RED if risk_val >= 70 else GREEN)
+
+    draw.text((52, rowA_y), pos_text, fill=WHITE, font=val_font, anchor="lm")
+    draw.text((529, rowA_y), mar_text, fill=WHITE, font=val_font, anchor="lm")
+    draw.text((1235, rowA_y), risk_text, fill=risk_color, font=val_font, anchor="rm")
+
+    # ---- 5. Row B values: Entry / Mark / Liquidation ----
+    rowB_y = 440 + YOFF
+    wipe(45,  rowB_y - 22,  340, rowB_y + 22)
+    wipe(520, rowB_y - 22,  860, rowB_y + 22)
+    wipe(1080, rowB_y - 22, 1250, rowB_y + 22)
+    liq_v = float(data.get("liquidation") or 0)
+    liq_color = GREEN if (entry_v > 0 and abs(liq_v - entry_v) / entry_v > 0.05) else RED
+    draw.text((52, rowB_y), format_price(entry_v).replace(",", ","), fill=WHITE, font=val_font, anchor="lm")
+    draw.text((529, rowB_y), format_price(mark_v).replace(",", ","), fill=WHITE, font=val_font, anchor="lm")
+    draw.text((1235, rowB_y), format_price(liq_v) if liq_v > 0 else "0",
+              fill=liq_color, font=val_font, anchor="rm")
+
+    # ---- "Вся позиция: VALUE/--" — wipe the right side and rewrite as --/-- ----
+    # SHORT template "Вся" starts at x=793, LONG at x=837 — wipe from x=780 to be safe
+    tpsl_y = 540 + YOFF
+    wipe(780, tpsl_y - 22, 1245, tpsl_y + 22)
+    tpsl_font = _load_font(fp_r, 32)
+    chev = "›"
+    chev_w = draw.textlength(chev, font=tpsl_font)
+    draw.text((1235, tpsl_y), chev, fill=GREY, font=tpsl_font, anchor="rm")
+    cursor = 1235 - chev_w - 10
+    dash_w = draw.textlength("--", font=tpsl_font)
+    draw.text((cursor, tpsl_y), "--", fill=RED, font=tpsl_font, anchor="rm")
+    cursor -= dash_w + 4
+    slash_w = draw.textlength("/", font=tpsl_font)
+    draw.text((cursor, tpsl_y), "/", fill=GREY, font=tpsl_font, anchor="rm")
+    cursor -= slash_w + 4
+    draw.text((cursor, tpsl_y), "--", fill=GREEN, font=tpsl_font, anchor="rm")
+    cursor -= dash_w + 8
+    label = "Вся позиция: "
+    draw.text((cursor, tpsl_y), label, fill=GREY, font=tpsl_font, anchor="rm")
+
+    # ---- 6. Realized P/U value on the right (just below T-п/с-л row) ----
+    realized = float(data.get("realized_pnl") or 0)
+    rl_y = 622 + YOFF
+    wipe(1000, rl_y - 22, 1250, rl_y + 22)
+    if realized != 0:
+        rl_text = f"{realized:+.4f}"
+        rl_color = GREEN if realized > 0 else RED
+    else:
+        rl_text, rl_color = "0", GREEN
+    draw.text((1235, rl_y), rl_text, fill=rl_color, font=val_font, anchor="rm")
+
+    img.save(output_path)
+    _cleanup_old_files(os.path.dirname(output_path), "result_")
+    return output_path
+
+
 def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
+    if data.get("exchange") == "bingx":
+        return generate_bingx_normal_card(data, percent, pnl_usdt)
+    return _legacy_generate_trade_image(data, percent, pnl, pnl_usdt)
+
+
+def _legacy_generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float) -> str:
     exchange = data["exchange"]
     template_path = os.path.join(BASE_DIR, "assets", exchange, "template.png")
     output_dir = os.path.join(BASE_DIR, "output")
@@ -1358,6 +1537,132 @@ def generate_trade_image(data: dict, percent: float, pnl: float, pnl_usdt: float
 # КАСТОМНЫЕ КАРТИНКИ
 # =====================================================
 def generate_custom_bybit_image(data: dict) -> str:
+    """Bybit custom share card rendered ON TOP of the user's reference templates
+    (Bybit_custom_<plus|minus>PNL_<LONG|SHORT>.JPG, 960x1320). Only the dynamic
+    values are wiped and re-drawn — the rocket/wallet illustrations, BYBIT logo,
+    avatar icon, ROI/Цена входа/Текущая цена labels, and the bottom promotional
+    band stay pixel-perfect from the reference.
+    """
+    try:
+        pnl = float(str(data["pnl"]).replace("%", "").replace(",", "."))
+    except ValueError:
+        pnl = 0.0
+    side = data.get("side", "long")
+    is_long = side == "long"
+
+    # Pick a template based on PnL sign + side. minusPNL_SHORT is missing;
+    # fall back to minusPNL_LONG (still wallet illustration) — pill colour gets
+    # overridden anyway by our re-draw, so the fallback works fine.
+    sign = "plus" if pnl >= 0 else "minus"
+    side_name = "LONG" if is_long else "SHORT"
+    template_name = f"Bybit_custom_{sign}PNL_{side_name}.JPG"
+    template_path = os.path.join(BASE_DIR, "assets", "bybit", template_name)
+    if not os.path.exists(template_path):
+        # Fallbacks
+        for cand in (f"Bybit_custom_{sign}PNL_LONG.JPG",
+                     "Bybit_custom_plusPNL_LONG.JPG"):
+            cand_path = os.path.join(BASE_DIR, "assets", "bybit", cand)
+            if os.path.exists(cand_path):
+                template_path = cand_path
+                break
+        else:
+            # Legacy fallback to old screenshot_*.png
+            return _legacy_generate_custom_bybit_image(data)
+
+    output_dir = os.path.join(BASE_DIR, "images")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"custom_bybit_{uuid.uuid4().hex[:8]}.png")
+
+    img = _load_template(template_path).copy()
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    draw = ImageDraw.Draw(img)
+    W, H = img.size  # 960 x 1320
+
+    BG    = (20, 20, 20)
+    WHITE = (255, 255, 255)
+    GREEN = (0, 208, 132)
+    RED   = (255, 59, 92)
+    GRAY  = (140, 150, 172)
+    PILL_BG = (27, 27, 27)
+    BLACK = (0, 0, 0)
+
+    fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
+    fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
+
+    def wipe(x1, y1, x2, y2, fill=BG):
+        draw.rectangle([x1, y1, x2, y2], fill=fill)
+
+    # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
+    username = str(data.get("username", "")).strip()
+    if username:
+        wipe(140, 175, 700, 222)
+        username_font = _load_font(fp_r, 40)
+        draw.text((148, 202), username, fill=GRAY, font=username_font, anchor="lm")
+
+    # ---- Symbol (e.g. SUIUSDT) + side pill (Long 50.0X / Short 50.0X) ----
+    symbol = data["symbol"].upper()
+    sym_font = _load_font(fp_b, 62)
+    sym_y_center = 320
+    # Wipe the entire symbol+pill strip
+    wipe(50, 285, 800, 355)
+    draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
+    sym_w = draw.textlength(symbol, font=sym_font)
+
+    # Side pill — text colour green for long, red for short. Pill bg = (27,27,27)
+    pill_text_color = GREEN if is_long else RED
+    leverage_num = float(str(data.get("leverage", "1")).replace("x", "").replace("X", ""))
+    pill_text = ("Long" if is_long else "Short") + f" {leverage_num:.1f}X"
+    pill_font = _load_font(fp_r, 38)
+    pad_x, pad_y = 28, 8
+    bb = draw.textbbox((0, 0), pill_text, font=pill_font)
+    pw = (bb[2] - bb[0]) + pad_x * 2
+    ph = max(53, (bb[3] - bb[1]) + pad_y * 2)
+    px = int(62 + sym_w + 32)
+    py = sym_y_center
+    draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
+                           radius=26, fill=PILL_BG)
+    draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font, anchor="mm")
+
+    # ---- Big ROI value (+12.72% / +8.97% / -100.79% etc.) ----
+    pnl_text = f"{pnl:+.2f}%"
+    pnl_color = GREEN if pnl >= 0 else RED
+    pnl_size = 102
+    pnl_font = _load_font(fp_b, pnl_size)
+    while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.78) and pnl_size > 60:
+        pnl_size -= 4
+        pnl_font = _load_font(fp_b, pnl_size)
+    wipe(45, 455, 760, 560)
+    draw.text((62, 506), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
+
+    # ---- Entry / Current prices (white bold) at 46pt Semibold. Preserve user's
+    #      original input string (entry_str / exit_str) so trailing zeros stay (e.g. 3.46670). ----
+    val_font = _load_font(fp_b, 46)
+    entry_text = (data.get("entry_str") or "").strip() or format_price(data.get("entry", 0))
+    exit_text  = (data.get("exit_str")  or "").strip() or format_price(data.get("exit", 0))
+    wipe(45, 660, 380, 720)
+    draw.text((62, 690), entry_text, fill=WHITE, font=val_font, anchor="lm")
+    wipe(45, 790, 380, 850)
+    draw.text((62, 816), exit_text,  fill=WHITE, font=val_font, anchor="lm")
+
+    # ---- Referral code on the white footer band — replace just the value ----
+    referral_code = str(data.get("referral", "")).strip()
+    if referral_code:
+        # The "Реферальный код:" label ends at x≈450; the value sits at x=470,
+        # vertical center y≈1242. Wipe just the value area (white bg) and rewrite.
+        FOOTER_BG = (240, 240, 244)
+        ref_font = _load_font(fp_b, 48)
+        draw.rectangle((460, 1218, 720, 1268), fill=FOOTER_BG)
+        draw.text((470, 1242), referral_code, fill=BLACK, font=ref_font, anchor="lm")
+
+    img.save(output_path)
+    _cleanup_old_files(os.path.dirname(output_path), "custom_bybit_")
+    return output_path
+
+
+def _legacy_generate_custom_bybit_image(data: dict) -> str:
+    """Old screenshot_long/short.png-based renderer kept as fallback if the new
+    Bybit_custom_*.JPG references are missing."""
     try:
         pnl = float(str(data["pnl"]).replace("%", "").replace(",", "."))
     except ValueError:
