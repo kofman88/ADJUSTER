@@ -1537,6 +1537,134 @@ def _legacy_generate_trade_image(data: dict, percent: float, pnl: float, pnl_usd
 # КАСТОМНЫЕ КАРТИНКИ
 # =====================================================
 def generate_custom_bybit_image(data: dict) -> str:
+    """Bybit custom share card rendered ON TOP of the user's reference templates
+    (Bybit_custom_<plus|minus>PNL_<LONG|SHORT>.JPG, 960x1320). Only the dynamic
+    values are wiped and re-drawn — the rocket/wallet illustrations, BYBIT logo,
+    avatar icon, ROI/Цена входа/Текущая цена labels, and the bottom promotional
+    band stay pixel-perfect from the reference.
+    """
+    try:
+        pnl = float(str(data["pnl"]).replace("%", "").replace(",", "."))
+    except ValueError:
+        pnl = 0.0
+    side = data.get("side", "long")
+    is_long = side == "long"
+
+    # Pick a template based on PnL sign + side. minusPNL_SHORT is missing;
+    # fall back to minusPNL_LONG (still wallet illustration) — pill colour gets
+    # overridden anyway by our re-draw, so the fallback works fine.
+    sign = "plus" if pnl >= 0 else "minus"
+    side_name = "LONG" if is_long else "SHORT"
+    template_name = f"Bybit_custom_{sign}PNL_{side_name}.JPG"
+    template_path = os.path.join(BASE_DIR, "assets", "bybit", template_name)
+    if not os.path.exists(template_path):
+        # Fallbacks
+        for cand in (f"Bybit_custom_{sign}PNL_LONG.JPG",
+                     "Bybit_custom_plusPNL_LONG.JPG"):
+            cand_path = os.path.join(BASE_DIR, "assets", "bybit", cand)
+            if os.path.exists(cand_path):
+                template_path = cand_path
+                break
+        else:
+            # Legacy fallback to old screenshot_*.png
+            return _legacy_generate_custom_bybit_image(data)
+
+    output_dir = os.path.join(BASE_DIR, "images")
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, f"custom_bybit_{uuid.uuid4().hex[:8]}.png")
+
+    img = _load_template(template_path).copy()
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    draw = ImageDraw.Draw(img)
+    W, H = img.size  # 960 x 1320
+
+    BG    = (20, 20, 20)
+    WHITE = (255, 255, 255)
+    GREEN = (0, 208, 132)
+    RED   = (255, 59, 92)
+    GRAY  = (140, 150, 172)
+    PILL_BG = (45, 45, 45)
+    BLACK = (0, 0, 0)
+
+    fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
+    fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
+
+    def wipe(x1, y1, x2, y2, fill=BG):
+        draw.rectangle([x1, y1, x2, y2], fill=fill)
+
+    # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
+    username = str(data.get("username", "")).strip()
+    if username:
+        wipe(140, 175, 700, 222)
+        username_font = _load_font(fp_r, 38)
+        draw.text((148, 197), username, fill=GRAY, font=username_font, anchor="lm")
+
+    # ---- Symbol (e.g. SUIUSDT) + side pill (Long 50.0X / Short 50.0X) ----
+    symbol = data["symbol"].upper()
+    sym_font = _load_font(fp_b, 60)
+    sym_y_center = 320
+    # Wipe the entire symbol+pill strip
+    wipe(50, 285, 800, 355)
+    draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
+    sym_w = draw.textlength(symbol, font=sym_font)
+
+    # Side pill — text colour green for long, red for short (same as the original
+    # Bybit share card's pill behaviour)
+    pill_text_color = GREEN if is_long else RED
+    leverage_num = float(str(data.get("leverage", "1")).replace("x", "").replace("X", ""))
+    pill_text = ("Long" if is_long else "Short") + f" {leverage_num:.1f}X"
+    pill_font = _load_font(fp_r, 32)
+    pad_x, pad_y = 24, 14
+    bb = draw.textbbox((0, 0), pill_text, font=pill_font)
+    pw = (bb[2] - bb[0]) + pad_x * 2
+    ph = (bb[3] - bb[1]) + pad_y * 2
+    px = int(62 + sym_w + 22)
+    py = sym_y_center
+    draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
+                           radius=18, fill=PILL_BG)
+    draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font, anchor="mm")
+
+    # ---- Big ROI value (+12.72% / +8.97% / -100.79% etc.) ----
+    pnl_text = f"{pnl:+.2f}%"
+    pnl_color = GREEN if pnl >= 0 else RED
+    # Allow the value to span up to ~75% of the canvas width before shrinking
+    pnl_size = 100
+    pnl_font = _load_font(fp_b, pnl_size)
+    while draw.textlength(pnl_text, font=pnl_font) > int(W * 0.75) and pnl_size > 60:
+        pnl_size -= 4
+        pnl_font = _load_font(fp_b, pnl_size)
+    wipe(45, 455, 760, 560)
+    draw.text((62, 506), pnl_text, fill=pnl_color, font=pnl_font, anchor="lm")
+
+    # ---- Entry / Current prices (white bold). Preserve user's original
+    #      input string (entry_str / exit_str) so trailing zeros stay (e.g. 3.46670). ----
+    val_font = _load_font(fp_b, 50)
+    entry_text = (data.get("entry_str") or "").strip() or format_price(data.get("entry", 0))
+    exit_text  = (data.get("exit_str")  or "").strip() or format_price(data.get("exit", 0))
+    wipe(45, 660, 380, 720)
+    draw.text((62, 690), entry_text, fill=WHITE, font=val_font, anchor="lm")
+    wipe(45, 790, 380, 850)
+    draw.text((62, 820), exit_text,  fill=WHITE, font=val_font, anchor="lm")
+
+    # ---- Referral code on the white footer band — replace just the value ----
+    referral_code = str(data.get("referral", "")).strip()
+    if referral_code:
+        # The "Реферальный код:" label ends at x≈450; the value sits at x=470,
+        # vertical center y≈1242. Wipe just the value area (white bg) and rewrite.
+        FOOTER_BG = (240, 240, 244)
+        ref_font = _load_font(fp_b, 48)
+        draw.rectangle((460, 1218, 720, 1268), fill=FOOTER_BG)
+        draw.text((470, 1242), referral_code, fill=BLACK, font=ref_font, anchor="lm")
+
+    img.save(output_path)
+    _cleanup_old_files(os.path.dirname(output_path), "custom_bybit_")
+    return output_path
+
+
+def _legacy_generate_custom_bybit_image(data: dict) -> str:
+    """Old screenshot_long/short.png-based renderer kept as fallback if the new
+    Bybit_custom_*.JPG references are missing."""
     try:
         pnl = float(str(data["pnl"]).replace("%", "").replace(",", "."))
     except ValueError:
