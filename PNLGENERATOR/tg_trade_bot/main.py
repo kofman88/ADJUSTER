@@ -78,6 +78,7 @@ def _load_icon(path: str, size: int) -> Image.Image:
 # FSM
 # =====================================================
 class CustomExchange(StatesGroup):
+    template = State()
     username = State()
     side = State()
     symbol = State()
@@ -211,6 +212,22 @@ skip_kb = InlineKeyboardMarkup(
     inline_keyboard=[[InlineKeyboardButton(text="⏭ Пропустить", callback_data="skip_field")]]
 )
 
+# BingX custom-template chooser ----------------------------------------------
+BINGX_TEMPLATES = ("football", "curve", "doge")
+BINGX_TEMPLATE_LABELS = {
+    "football": "⚽ Футбол",
+    "curve":    "📉 Свеча",
+    "doge":     "🐕 Доге",
+}
+
+bingx_template_kb = InlineKeyboardMarkup(
+    inline_keyboard=[[
+        InlineKeyboardButton(text=BINGX_TEMPLATE_LABELS["football"], callback_data="bingx_tpl:football"),
+        InlineKeyboardButton(text=BINGX_TEMPLATE_LABELS["curve"],    callback_data="bingx_tpl:curve"),
+        InlineKeyboardButton(text=BINGX_TEMPLATE_LABELS["doge"],     callback_data="bingx_tpl:doge"),
+    ]]
+)
+
 _MAIN_KB_MARKUP: InlineKeyboardMarkup | None = None
 
 def get_main_kb() -> InlineKeyboardMarkup:
@@ -337,6 +354,9 @@ async def test_all(message: Message):
         "/test_custom_bybit_short\n"
         "/test_custom_bingx_long\n"
         "/test_custom_bingx_short\n"
+        "/test_custom_bingx_short_football\n"
+        "/test_custom_bingx_short_curve\n"
+        "/test_custom_bingx_short_doge\n"
         "/test_custom_bybit_usdt_long\n"
         "/test_custom_bybit_usdt_short"
     )
@@ -403,7 +423,7 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
         logger.error(f"Image generation error: {e}")
         await message.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
 
-async def _run_custom_test(message: Message, exchange: str, side: str):
+async def _run_custom_test(message: Message, exchange: str, side: str, template: str | None = None):
     entry = 0.1068
     exit_price = 0.1092 if side == "long" else 0.1040
     leverage_str = "50x"
@@ -425,6 +445,8 @@ async def _run_custom_test(message: Message, exchange: str, side: str):
         "referral": "D1BFA4",
         "datetime_str": "02/14 19:00",
     }
+    if template:
+        image_data["template"] = template
 
     loop = asyncio.get_event_loop()
     try:
@@ -456,6 +478,21 @@ async def test_custom_bingx_long(message: Message):
 @dp.message(Command("test_custom_bingx_short"))
 async def test_custom_bingx_short(message: Message):
     await _run_custom_test(message, exchange="bingx", side="short")
+
+
+@dp.message(Command("test_custom_bingx_short_curve"))
+async def test_custom_bingx_short_curve(message: Message):
+    await _run_custom_test(message, exchange="bingx", side="short", template="curve")
+
+
+@dp.message(Command("test_custom_bingx_short_doge"))
+async def test_custom_bingx_short_doge(message: Message):
+    await _run_custom_test(message, exchange="bingx", side="short", template="doge")
+
+
+@dp.message(Command("test_custom_bingx_short_football"))
+async def test_custom_bingx_short_football(message: Message):
+    await _run_custom_test(message, exchange="bingx", side="short", template="football")
 
 
 async def _run_custom_usdt_test(message: Message, side: str):
@@ -1488,7 +1525,14 @@ def generate_custom_bingx_image(data: dict) -> str:
     except ValueError:
         pnl = 0.0
     template_side = "long" if pnl >= 0 else "short"
-    template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}.png")
+    template_variant = data.get("template", "football")
+    if template_variant not in ("football", "curve", "doge"):
+        template_variant = "football"
+    suffix = "" if template_variant == "football" else f"_{template_variant}"
+    template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}{suffix}.png")
+    if not os.path.exists(template_path):
+        # Fallback to default football template if variant asset missing
+        template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}.png")
     output_dir = os.path.join(BASE_DIR, "images")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"custom_bingx_{uuid.uuid4().hex[:8]}.png")
@@ -1613,7 +1657,29 @@ async def start_custom_bingx(cb: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await state.update_data(exchange="bingx")
-    msg = await cb.message.answer("👤 Введите имя пользователя:")
+    msg = await cb.message.answer(
+        "🎨 Выбери шаблон:",
+        reply_markup=bingx_template_kb,
+    )
+    await state.update_data(custom_last_msg_id=msg.message_id)
+    await state.set_state(CustomExchange.template)
+
+
+@dp.callback_query(CustomExchange.template, F.data.startswith("bingx_tpl:"))
+async def custom_bingx_template(call: CallbackQuery, state: FSMContext):
+    template = call.data.split(":", 1)[1]
+    if template not in BINGX_TEMPLATES:
+        await call.answer("❌ Неизвестный шаблон")
+        return
+    await state.update_data(template=template)
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
+    msg = await call.message.answer(
+        f"Шаблон: {BINGX_TEMPLATE_LABELS[template]}\n👤 Введите имя пользователя:"
+    )
     await state.update_data(custom_last_msg_id=msg.message_id)
     await state.set_state(CustomExchange.username)
 
@@ -1990,6 +2056,7 @@ async def custom_finish(msg: Message, state: FSMContext):
         image_data["leverage"] = data["leverage"]
         image_data["referral"] = data.get("referral", "")
         image_data["datetime_str"] = data.get("datetime_str", "")
+        image_data["template"] = data.get("template", "football")
         gen_func = generate_custom_bingx_image
     else:
         image_data["leverage"] = f"{leverage:.1f}x"
