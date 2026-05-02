@@ -1186,21 +1186,37 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    # Y offsets between SHORT and LONG references (LONG sits ~16px higher)
-    YOFF = -16 if is_long else 0
+    # Per-template y offset (LONG sits ~15px higher) and candle-icon left edge
+    if is_long:
+        YOFF = -15
+        candle_icon_x = 370   # candle icon starts here on LONG (after GIGGLEUSDT)
+    else:
+        YOFF = 0
+        candle_icon_x = 290   # candle icon starts here on SHORT (after ETHUSDT)
 
     def wipe(x1, y1, x2, y2):
         draw.rectangle([x1, y1, x2, y2], fill=BG)
 
-    # ---- 1. Symbol (e.g. ETHUSDT / GIGGLEUSDT) ----
-    # 46pt SF Pro Semibold matches the original BingX symbol size (ETHUSDT≈204px).
-    # Wipe area sized for any reasonable symbol; candle icon sits at x≈290-325.
+    # ---- 1. Symbol (ETHUSDT / GIGGLEUSDT / …) + candle icon next to it ----
+    # In the real BingX UI the icon FOLLOWS the symbol, so we wipe the entire
+    # symbol+icon strip and re-draw the symbol followed by the candle icon
+    # extracted from the original screenshot.
     symbol = data["symbol"].upper()
     sym_y_center = 67 + YOFF
     sym_font = _load_font(fp_b, 46)
-    sym_w = draw.textlength(symbol, font=sym_font)
-    wipe(45, 45 + YOFF, max(280, int(52 + sym_w + 24)), 95 + YOFF)
+    # Wipe everything across the symbol/icon strip (well past where any symbol
+    # could end on either base template).
+    wipe(45, 40 + YOFF, 430, 100 + YOFF)
     draw.text((52, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
+    # Paste candle icon ~24px after the symbol's right edge
+    sym_w = draw.textlength(symbol, font=sym_font)
+    icon_path = os.path.join(BASE_DIR, "assets", "bingx", "candle_icon.png")
+    if os.path.exists(icon_path):
+        icon = Image.open(icon_path).convert("RGBA")
+        ix = int(52 + sym_w + 24)
+        iy = sym_y_center - icon.height // 2
+        img.paste(icon, (ix, iy), icon)
+        draw = ImageDraw.Draw(img)
 
     # ---- 2. Leverage pill text (e.g. "5X") — wipe and rewrite to match user's leverage ----
     lev_int = int(float(str(data["leverage"]).replace("x", "").replace("X", "")))
@@ -1242,10 +1258,11 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
 
     # ---- 4. Row A values: Position USDT / Margin / Risk ----
     val_font = _load_font(fp_r, 38)
-    rowA_y = 302
-    wipe(45, 285, 230, 325)            # Position
-    wipe(520, 285, 740, 325)           # Margin
-    wipe(1100, 285, 1245, 325)         # Risk
+    rowA_y = 302 + YOFF
+    # Wider wipes to fully erase any value the base template carries
+    wipe(45,  rowA_y - 22,  340, rowA_y + 22)   # Position
+    wipe(520, rowA_y - 22,  860, rowA_y + 22)   # Margin
+    wipe(1080, rowA_y - 22, 1250, rowA_y + 22)  # Risk
     pos_text = f"{position_usdt:,.2f}".rstrip("0").rstrip(".") or "0"
     mar_text = f"{margin_v:,.4f}"
     # Risk: maintenance margin / margin balance × 100  (bingx-style approx)
@@ -1261,10 +1278,10 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     draw.text((1235, rowA_y), risk_text, fill=risk_color, font=val_font, anchor="rm")
 
     # ---- 5. Row B values: Entry / Mark / Liquidation ----
-    rowB_y = 440
-    wipe(45, 420, 230, 460)
-    wipe(520, 420, 700, 460)
-    wipe(1080, 420, 1245, 460)
+    rowB_y = 440 + YOFF
+    wipe(45,  rowB_y - 22,  340, rowB_y + 22)
+    wipe(520, rowB_y - 22,  860, rowB_y + 22)
+    wipe(1080, rowB_y - 22, 1250, rowB_y + 22)
     liq_v = float(data.get("liquidation") or 0)
     liq_color = GREEN if (entry_v > 0 and abs(liq_v - entry_v) / entry_v > 0.05) else RED
     draw.text((52, rowB_y), format_price(entry_v).replace(",", ","), fill=WHITE, font=val_font, anchor="lm")
@@ -1272,15 +1289,36 @@ def generate_bingx_normal_card(data: dict, percent: float, pnl_usdt: float) -> s
     draw.text((1235, rowB_y), format_price(liq_v) if liq_v > 0 else "0",
               fill=liq_color, font=val_font, anchor="rm")
 
+    # ---- "Вся позиция: VALUE/--" — wipe the right side and rewrite as --/-- ----
+    # SHORT template "Вся" starts at x=793, LONG at x=837 — wipe from x=780 to be safe
+    tpsl_y = 540 + YOFF
+    wipe(780, tpsl_y - 22, 1245, tpsl_y + 22)
+    tpsl_font = _load_font(fp_r, 32)
+    chev = "›"
+    chev_w = draw.textlength(chev, font=tpsl_font)
+    draw.text((1235, tpsl_y), chev, fill=GREY, font=tpsl_font, anchor="rm")
+    cursor = 1235 - chev_w - 10
+    dash_w = draw.textlength("--", font=tpsl_font)
+    draw.text((cursor, tpsl_y), "--", fill=RED, font=tpsl_font, anchor="rm")
+    cursor -= dash_w + 4
+    slash_w = draw.textlength("/", font=tpsl_font)
+    draw.text((cursor, tpsl_y), "/", fill=GREY, font=tpsl_font, anchor="rm")
+    cursor -= slash_w + 4
+    draw.text((cursor, tpsl_y), "--", fill=GREEN, font=tpsl_font, anchor="rm")
+    cursor -= dash_w + 8
+    label = "Вся позиция: "
+    draw.text((cursor, tpsl_y), label, fill=GREY, font=tpsl_font, anchor="rm")
+
     # ---- 6. Realized P/U value on the right (just below T-п/с-л row) ----
     realized = float(data.get("realized_pnl") or 0)
-    wipe(1080, 600, 1245, 645)
+    rl_y = 622 + YOFF
+    wipe(1000, rl_y - 22, 1250, rl_y + 22)
     if realized != 0:
         rl_text = f"{realized:+.4f}"
         rl_color = GREEN if realized > 0 else RED
     else:
         rl_text, rl_color = "0", GREEN
-    draw.text((1235, 622), rl_text, fill=rl_color, font=val_font, anchor="rm")
+    draw.text((1235, rl_y), rl_text, fill=rl_color, font=val_font, anchor="rm")
 
     img.save(output_path)
     _cleanup_old_files(os.path.dirname(output_path), "result_")
