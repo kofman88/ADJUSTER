@@ -12,8 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY tg_trade_bot/ ./
 
-# Create output directories
-RUN mkdir -p images output
+# Create output and data directories (data is mounted as volume in production)
+RUN mkdir -p images output data
 
 ENV PYTHONUNBUFFERED=1
 
