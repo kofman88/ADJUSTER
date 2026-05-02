@@ -4,3 +4,5 @@ __pycache__/
 .env
 PNLGENERATOR/tg_trade_bot/output/result_*.png
 PNLGENERATOR/tg_trade_bot/images/test_*.png
+# Runtime-generated card snapshots (custom_bingx_<hash>.png, custom_bybit_<hash>.png)
+PNLGENERATOR/tg_trade_bot/images/custom_*_????????.png

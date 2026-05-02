@@ -569,11 +569,13 @@ _REF_TEST_CASES = {
     "bybit_plus_short": dict(
         render="bybit_share",
         data={"username":"chmst","symbol":"SUIUSDT","pnl":8.97,"entry":3.4667,"exit":3.4003,
+              "entry_str":"3.46670","exit_str":"3.40030",
               "leverage":"50x","side":"short","referral":"POKOIV","status":"closed"},
     ),
     "bybit_minus_long": dict(
         render="bybit_share",
         data={"username":"chmst","symbol":"WLDUSDT","pnl":-100.79,"entry":0.9869,"exit":0.9665,
+              "entry_str":"0.9869","exit_str":"0.9665",
               "leverage":"50x","side":"long","referral":"PGKDGV","status":"closed"},
     ),
     # BingX normal UI — match NORMAL_BINGX_<LONG|SHORT>.jpg
