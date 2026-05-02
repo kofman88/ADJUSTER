@@ -1898,27 +1898,68 @@ def generate_custom_bybit_usdt_image(data: dict) -> str:
 
 
 def generate_custom_bingx_image(data: dict) -> str:
-    """Render BingX share card pixel-matched to user's reference templates.
-    All text is drawn programmatically on top of a clean background that
-    contains only: BingX logo, right-side decoration, CHM_LAB triangle, QR."""
+    """Render BingX share card on top of the user's BINGX_Custom_*.JPG references
+    (whale / dot / football, plus/minus). The references already contain the
+    finished artwork and a sample of text — we wipe just the dynamic text zones
+    on the dark left column and re-draw the user's data."""
     try:
         pnl = float(str(data["pnl"]).replace("%", "").replace(",", "."))
     except ValueError:
         pnl = 0.0
-    template_side = "long" if pnl >= 0 else "short"
-    template_variant = data.get("template", "football")
-    if template_variant not in ("football", "curve", "doge"):
-        template_variant = "football"
-    template_path = os.path.join(BASE_DIR, "assets", "bingx", f"clean_{template_side}_{template_variant}.png")
+
+    # The references are split by PnL sign: plus = green/long theme, minus = red/short theme.
+    sign = "plus" if pnl >= 0 else "minus"
+
+    # Variant aliases: legacy bot states use "doge" / "curve"; the user's reference
+    # filenames are "whale" / "dot". Accept both, normalise to the reference name.
+    variant_alias = {"doge": "whale", "curve": "dot", "whale": "whale", "dot": "dot", "football": "football"}
+    variant_in = data.get("template", "football")
+    template_variant = variant_alias.get(variant_in, "football")
+
+    template_path = os.path.join(BASE_DIR, "assets", "bingx", f"BINGX_Custom_{template_variant}_{sign}.JPG")
     if not os.path.exists(template_path):
-        # legacy fallback if a clean asset is missing
-        template_path = os.path.join(BASE_DIR, "assets", "bingx", f"screenshot_{template_side}.png")
+        # Fall back to legacy clean_*.png if the reference is missing.
+        legacy_side = "long" if pnl >= 0 else "short"
+        legacy_variant = {"whale": "doge", "dot": "curve", "football": "football"}[template_variant]
+        template_path = os.path.join(BASE_DIR, "assets", "bingx", f"clean_{legacy_side}_{legacy_variant}.png")
+    if not os.path.exists(template_path):
+        template_path = os.path.join(BASE_DIR, "assets", "bingx",
+                                     f"screenshot_{'long' if pnl >= 0 else 'short'}.png")
     output_dir = os.path.join(BASE_DIR, "images")
     os.makedirs(output_dir, exist_ok=True)
     output_path = os.path.join(output_dir, f"custom_bingx_{uuid.uuid4().hex[:8]}.png")
 
     img = _load_template(template_path).copy()
+    if img.mode != "RGB":
+        img = img.convert("RGB")
     w, h = img.size  # 1800x1800
+    draw = ImageDraw.Draw(img)
+
+    # Wipe the dynamic-text zones by copying a clean strip from immediately
+    # above each zone (or below, if there's no room). This preserves any subtle
+    # background gradient instead of leaving a visible flat-fill rectangle.
+    text_zones = [
+        (98,  470,  720, 540),   # Header: "Реализованная / Нереализованная П/У"
+        (98,  605, 1100, 680),   # Symbol │ Side │ Lev row
+        (98,  790, 1080, 960),   # Big PnL "+224.11%"
+        (98, 1060,  870, 1130),  # Price 1 (label + value)
+        (98, 1175,  870, 1240),  # Price 2 (label + value)
+        (270, 1560, 700, 1620),  # Username "CHM_LAB"
+        (270, 1655, 450, 1710),  # Date "05-02"
+        (900, 1550, 1525, 1620), # Referral label "Реферальный код"
+        (1300, 1645, 1525, 1700),# Referral code "D1BFA4"
+    ]
+    for x1, y1, x2, y2 in text_zones:
+        zone_h = y2 - y1
+        # Try a clean strip ABOVE the zone first (clear of artwork on the left).
+        sample_top = y1 - zone_h - 4
+        sample_bot = y1 - 4
+        if sample_top < 0:
+            # Fall back to strip BELOW the zone.
+            sample_top = y2 + 4
+            sample_bot = sample_top + zone_h
+        strip = img.crop((x1, sample_top, x2, sample_bot))
+        img.paste(strip, (x1, y1))
     draw = ImageDraw.Draw(img)
 
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
