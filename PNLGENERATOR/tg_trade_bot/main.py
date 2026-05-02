@@ -1611,11 +1611,12 @@ def generate_custom_bybit_image(data: dict) -> str:
             cur_y += ch
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
+    # Reference: text at x=133, y=188-216 (h=28 ≈ 36pt Semibold), bright white.
     username = str(data.get("username", "")).strip()
     if username:
-        wipe(140, 175, 700, 222)
-        username_font = _load_font(fp_r, 40)
-        draw.text((148, 202), username, fill=GRAY, font=username_font, anchor="lm")
+        wipe(135, 175, 700, 222)
+        username_font = _load_font(fp_b, 36)
+        draw.text((140, 202), username, fill=WHITE, font=username_font, anchor="lm")
 
     # ---- Symbol (e.g. SUIUSDT) + side pill (Long 50.0X / Short 50.0X) ----
     symbol = data["symbol"].upper()
