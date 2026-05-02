@@ -1624,9 +1624,6 @@ def generate_custom_bybit_image(data: dict) -> str:
     symbol = data["symbol"].upper()
     sym_font = _load_font(fp_b, 62)
     sym_y_center = 320
-    # Wipe the entire symbol+pill strip
-    wipe(50, 285, 800, 355)
-    draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
     sym_w = draw.textlength(symbol, font=sym_font)
 
     # Side pill — text colour green for long, red for short. Pill bg = (27,27,27)
@@ -1640,6 +1637,12 @@ def generate_custom_bybit_image(data: dict) -> str:
     ph = max(53, (bb[3] - bb[1]) + pad_y * 2)
     px = int(62 + sym_w + 32)
     py = sym_y_center
+
+    # Wipe ONLY the area we'll redraw on (symbol + gap + pill). Leave the
+    # decoration on the right side untouched (rocket / wallet / coin sparkles).
+    wipe_right = max(800, px + pw + 4)  # never narrower than original symbols
+    wipe(50, 285, wipe_right, 355)
+    draw.text((62, sym_y_center), symbol, fill=WHITE, font=sym_font, anchor="lm")
     draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
                            radius=26, fill=PILL_BG)
     draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font, anchor="mm")
