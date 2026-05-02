@@ -1611,12 +1611,14 @@ def generate_custom_bybit_image(data: dict) -> str:
             cur_y += ch
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays. ----
-    # Reference: text at x=133, y=188-216 (h=28 ≈ 36pt Semibold), bright white.
+    # Reference: text at x=133-235 (w=102, h=27) — heavier than SF Pro Semibold.
+    # Inter-Bold 36pt gives w=104, h=26 — much closer to the actual Bybit weight.
     username = str(data.get("username", "")).strip()
     if username:
-        wipe(135, 175, 700, 222)
-        username_font = _load_font(fp_b, 36)
-        draw.text((140, 202), username, fill=WHITE, font=username_font, anchor="lm")
+        wipe(128, 175, 720, 222)
+        inter_bold = os.path.join(BASE_DIR, "fonts", "inter-bold.otf")
+        username_font = _load_font(inter_bold, 34)
+        draw.text((133, 202), username, fill=WHITE, font=username_font, anchor="lm")
 
     # ---- Symbol (e.g. SUIUSDT) + side pill (Long 50.0X / Short 50.0X) ----
     symbol = data["symbol"].upper()
