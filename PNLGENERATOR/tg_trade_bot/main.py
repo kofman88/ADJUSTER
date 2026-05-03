@@ -2195,12 +2195,18 @@ def generate_custom_bingx_image(data: dict) -> str:
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
 
-    # Font sizes calibrated to text bounding boxes measured in BINGX_Custom_*.JPG
-    f_header   = _load_font(fp_b, 64)    # ref h=57
-    f_meta     = _load_font(fp_b, 80)    # ref h=58
-    f_pnl      = _load_font(fp_b, 215)   # ref h=156
-    f_label    = _load_font(fp_r, 50)    # ref h=45
-    f_value    = _load_font(fp_b, 56)    # ref h=45 (value slightly bolder than label)
+    # Font sizes calibrated to WIDTH of reference text (height matches naturally
+    # because SF Pro Display has fixed aspect ratio):
+    #   "Реализованная П/У" ref w=614 → Bold 68 (w=608)
+    #   "SKYAIUSDT │ Лонг │ 20X" ref full row w=983 → Bold 88 (matches)
+    #   "+224.11%" ref w=924 → Bold 215 (w=916)
+    #   "Цена закрытия" ref w=439 → Reg 66 (w=439 exact)
+    #   "0.38763" ref w=241 → Bold 62 (w=243)
+    f_header   = _load_font(fp_b, 68)    # ref w=614 (got w=610, close)
+    f_meta     = _load_font(fp_b, 76)    # ref SKYAIUSDT w=405 (Bold 76 → w=403)
+    f_pnl      = _load_font(fp_b, 215)   # ref w=924
+    f_label    = _load_font(fp_r, 66)    # ref w=439 (exact)
+    f_value    = _load_font(fp_b, 62)    # ref w=241 (got w=243, close)
     f_username = _load_font(fp_b, 56)    # ref h=49
     f_date     = _load_font(fp_r, 50)    # ref h=44
     f_ref_lbl  = _load_font(fp_r, 50)    # ref h=45
@@ -2219,7 +2225,7 @@ def generate_custom_bingx_image(data: dict) -> str:
     # Pixel-anchor map measured from BINGX_Custom_*.JPG references (1800x1800).
     # HEADER_Y is biased -5 because PIL's "lm" anchor at f_header=64 sits ~5px below
     # visual cap-height center; other fonts/sizes empirically align without bias.
-    LEFT_X         = 98     # all left-aligned texts share this x
+    LEFT_X         = 93     # anchor x; PIL "lm" adds ~5px left bearing → visible text starts at x=98 matching ref
     HEADER_Y       = 499    # "Реализованная / Нереализованная П/У" (ref center 504)
     META_Y         = 642    # "SYMBOL │ Side │ Lev"
     PNL_Y          = 876    # big "+224.11%"
