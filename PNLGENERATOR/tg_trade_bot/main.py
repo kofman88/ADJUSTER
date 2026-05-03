@@ -17,6 +17,7 @@ from access import (
     get_referral_code, get_referral_stats, use_referral,
     get_profile, update_profile, clear_profile,
     add_history, get_history,
+    get_user_logo_path, has_user_logo, clear_user_logo, LOGO_DIR,
 )
 from i18n import get_lang, set_lang
 
@@ -80,6 +81,41 @@ def _load_icon(path: str, size: int) -> Image.Image:
     icon = Image.open(path).convert("RGBA")
     return icon.resize((size, size), Image.LANCZOS)
 
+
+# =====================================================
+# USER LOGO OVERLAY — bottom-right watermark applied AFTER renderer returns,
+# so the existing pixel-perfect renderers stay untouched.
+# =====================================================
+def _apply_user_logo(card_path: str, user_id: int) -> str:
+    """If `user_id` has a saved logo, composite it onto the card's bottom-right
+    corner at ~12% width with 70% alpha and return a NEW path. If there's no
+    logo or anything fails, returns the original path unchanged."""
+    logo_path = get_user_logo_path(user_id)
+    if not logo_path:
+        return card_path
+    try:
+        card = Image.open(card_path).convert("RGBA")
+        logo = Image.open(logo_path).convert("RGBA")
+        target_w = max(80, int(card.width * 0.12))
+        scale    = target_w / logo.width
+        target_h = max(1, int(logo.height * scale))
+        logo = logo.resize((target_w, target_h), Image.LANCZOS)
+        # Knock alpha down to 70% so the logo doesn't fight the card content.
+        r, g, b, a = logo.split()
+        a = a.point(lambda p: int(p * 0.7))
+        logo = Image.merge("RGBA", (r, g, b, a))
+        margin = max(20, int(card.width * 0.035))
+        x = card.width  - logo.width  - margin
+        y = card.height - logo.height - margin
+        card.alpha_composite(logo, (x, y))
+        out = card_path.rsplit(".", 1)[0] + "_wm.png"
+        card.convert("RGB").save(out, "PNG", optimize=True)
+        return out
+    except Exception as e:
+        logger.warning(f"Logo overlay failed for user {user_id}: {e}")
+        return card_path
+
+
 # =====================================================
 # FSM
 # =====================================================
@@ -131,6 +167,7 @@ class SignalForm(StatesGroup):
 
 class ProfileForm(StatesGroup):
     edit_value = State()    # transient — waiting for new value for profile field
+    set_logo   = State()    # transient — waiting for a photo to use as watermark
 
 BASE_H = 467
 
@@ -514,7 +551,7 @@ async def _handle_signal_text(msg: Message, state: FSMContext, text: str):
     else:
         await msg.answer(_signal_summary(parsed) + "\n\nКакую цену выхода взять?",
                          reply_markup=_signal_exit_kb(parsed))
-    await state.update_data(_sig=parsed)
+    await state.update_data(_sig=parsed, _user_id=msg.from_user.id)
     await state.set_state(SignalForm.exit_choice)
 
 
@@ -841,10 +878,13 @@ async def _render_preview(msg, state: FSMContext):
     """Render current draft, show as photo with edit/send keyboard."""
     data = await state.get_data()
     sig = data["_sig"]
+    uid = data.get("_user_id")
     image_data, gen_func = _build_image_data(sig)
     loop = asyncio.get_event_loop()
     try:
         path = await loop.run_in_executor(_THREAD_POOL, gen_func, image_data)
+        if uid:
+            path = await loop.run_in_executor(_THREAD_POOL, _apply_user_logo, path, uid)
     except Exception as e:
         logger.error(f"Preview render error: {e}")
         await msg.answer("Ошибка генерации картинки.")
@@ -884,6 +924,7 @@ async def signal_preview_send(call: CallbackQuery, state: FSMContext):
     loop = asyncio.get_event_loop()
     try:
         path = await loop.run_in_executor(_THREAD_POOL, gen_func, image_data)
+        path = await loop.run_in_executor(_THREAD_POOL, _apply_user_logo, path, call.from_user.id)
         await call.message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
         has_access, _ = check_access(call.from_user.id)
         if not has_access:
@@ -3122,7 +3163,7 @@ async def start_custom_bybit(cb: CallbackQuery, state: FSMContext):
         return
 
     await state.clear()
-    await state.update_data(exchange="bybit")
+    await state.update_data(exchange="bybit", _user_id=cb.from_user.id)
     msg = await cb.message.answer(
         "👤 Введите имя пользователя (или пропустите, чтобы оставить пустым):",
         reply_markup=skip_kb,
@@ -3139,7 +3180,7 @@ async def start_custom_bingx(cb: CallbackQuery, state: FSMContext):
         return
 
     await state.clear()
-    await state.update_data(exchange="bingx")
+    await state.update_data(exchange="bingx", _user_id=cb.from_user.id)
     msg = await cb.message.answer(
         "🎨 Выбери шаблон:",
         reply_markup=bingx_template_kb,
@@ -3176,6 +3217,7 @@ async def start_custom_bybit_usdt(cb: CallbackQuery, state: FSMContext):
         return
 
     await state.clear()
+    await state.update_data(_user_id=cb.from_user.id)
     msg = await cb.message.answer("👤 Введите имя пользователя:")
     await state.update_data(custom_last_msg_id=msg.message_id)
     await state.set_state(CustomExchangeUSDT.username)
@@ -3340,6 +3382,9 @@ async def cusdt_finish(msg: Message, state: FSMContext):
     loop = asyncio.get_event_loop()
     try:
         path = await loop.run_in_executor(_THREAD_POOL, generate_custom_bybit_usdt_image, image_data)
+        uid = (await state.get_data()).get("_user_id")
+        if uid:
+            path = await loop.run_in_executor(_THREAD_POOL, _apply_user_logo, path, uid)
         await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
     except Exception as e:
         logger.error(f"Image generation error: {e}")
@@ -3601,6 +3646,9 @@ async def custom_finish(msg: Message, state: FSMContext):
             logger.debug(f"Non-critical error: {e}")
     try:
         path = await loop.run_in_executor(_THREAD_POOL, gen_func, image_data)
+        uid = data.get("_user_id")
+        if uid:
+            path = await loop.run_in_executor(_THREAD_POOL, _apply_user_logo, path, uid)
         await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
     except Exception as e:
         logger.error(f"Image generation error: {e}")
@@ -3653,50 +3701,59 @@ async def cmd_lang(message: Message):
 # =====================================================
 # USER PROFILE — saved defaults that pre-fill signal flow
 # =====================================================
-def _profile_kb(has_channel: bool = False) -> InlineKeyboardMarkup:
+def _profile_kb(has_channel: bool = False, has_logo: bool = False) -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text="✏️ Имя",      callback_data="profile_edit:username"),
          InlineKeyboardButton(text="✏️ Реф.код",  callback_data="profile_edit:referral")],
         [InlineKeyboardButton(text="🟡 Bybit",    callback_data="profile_set:exchange:bybit"),
          InlineKeyboardButton(text="🟢 BingX",    callback_data="profile_set:exchange:bingx")],
         [InlineKeyboardButton(text="📢 Канал",    callback_data="profile_edit:channel")],
+        [InlineKeyboardButton(text="🖼 Лого",     callback_data="profile_set_logo")],
     ]
     if has_channel:
-        rows[-1].append(InlineKeyboardButton(text="🚫 Откл. канал",
+        rows[-2].append(InlineKeyboardButton(text="🚫 Откл. канал",
                                               callback_data="profile_clear_channel"))
+    if has_logo:
+        rows[-1].append(InlineKeyboardButton(text="🚫 Убрать лого",
+                                              callback_data="profile_clear_logo"))
     rows.append([InlineKeyboardButton(text="🗑 Сбросить", callback_data="profile_clear")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _profile_text(p: dict) -> str:
+def _profile_text(p: dict, has_logo: bool = False) -> str:
     chan = p.get("channel")
     chan_line = f"Канал: <code>{chan}</code>\n" if chan else ""
+    logo_line = f"Лого:  {'✅ установлено' if has_logo else '—'}\n"
     return (
         "👤 <b>Твой профиль</b>\n\n"
         f"Имя:   <code>{p.get('username') or '—'}</code>\n"
         f"Реф:   <code>{p.get('referral') or '—'}</code>\n"
         f"Биржа: <code>{p.get('exchange') or '—'}</code>\n"
         f"{chan_line}"
+        f"{logo_line}"
         "\n"
         "Эти значения подставляются автоматически в «⚡ Быстрый скрин» — "
         "соответствующие шаги пропускаются. Меняй их в превью или здесь.\n"
-        "Канал — если задан, бот публикует туда финальную карточку после ✅ Отправить."
+        "Канал — если задан, бот публикует туда финальную карточку после ✅ Отправить.\n"
+        "Лого — если задано, накладывается водяным знаком в правом нижнем углу карточки."
     )
 
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     p = get_profile(message.from_user.id)
-    await message.answer(_profile_text(p), parse_mode="HTML",
-                         reply_markup=_profile_kb(bool(p.get("channel"))))
+    has_logo = has_user_logo(message.from_user.id)
+    await message.answer(_profile_text(p, has_logo), parse_mode="HTML",
+                         reply_markup=_profile_kb(bool(p.get("channel")), has_logo))
 
 
 @dp.callback_query(F.data == "profile_show")
 async def cb_profile_show(call: CallbackQuery, state: FSMContext):
     await call.answer()
     p = get_profile(call.from_user.id)
-    await call.message.answer(_profile_text(p), parse_mode="HTML",
-                              reply_markup=_profile_kb(bool(p.get("channel"))))
+    has_logo = has_user_logo(call.from_user.id)
+    await call.message.answer(_profile_text(p, has_logo), parse_mode="HTML",
+                              reply_markup=_profile_kb(bool(p.get("channel")), has_logo))
 
 
 @dp.callback_query(F.data == "profile_clear")
@@ -3718,8 +3775,9 @@ async def cb_profile_set(call: CallbackQuery, state: FSMContext):
     try: await call.message.delete()
     except Exception: pass
     p = get_profile(call.from_user.id)
-    await call.message.answer(_profile_text(p), parse_mode="HTML",
-                              reply_markup=_profile_kb(bool(p.get("channel"))))
+    has_logo = has_user_logo(call.from_user.id)
+    await call.message.answer(_profile_text(p, has_logo), parse_mode="HTML",
+                              reply_markup=_profile_kb(bool(p.get("channel")), has_logo))
 
 
 @dp.callback_query(F.data.startswith("profile_edit:"))
@@ -3747,8 +3805,71 @@ async def cb_profile_clear_channel(call: CallbackQuery, state: FSMContext):
     try: await call.message.delete()
     except Exception: pass
     p = get_profile(call.from_user.id)
-    await call.message.answer(_profile_text(p), parse_mode="HTML",
-                              reply_markup=_profile_kb(bool(p.get("channel"))))
+    has_logo = has_user_logo(call.from_user.id)
+    await call.message.answer(_profile_text(p, has_logo), parse_mode="HTML",
+                              reply_markup=_profile_kb(bool(p.get("channel")), has_logo))
+
+
+@dp.callback_query(F.data == "profile_set_logo")
+async def cb_profile_set_logo(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await call.message.answer(
+        "🖼 Пришли картинку (фото или файл-PNG), которая станет твоим водяным "
+        "знаком в правом нижнем углу карточек. Прозрачный PNG-фон выглядит "
+        "лучше всего.\n\n/cancel — отменить."
+    )
+    await state.set_state(ProfileForm.set_logo)
+
+
+@dp.callback_query(F.data == "profile_clear_logo")
+async def cb_profile_clear_logo(call: CallbackQuery, state: FSMContext):
+    clear_user_logo(call.from_user.id)
+    await call.answer("✓ Лого убрано")
+    try: await call.message.delete()
+    except Exception: pass
+    p = get_profile(call.from_user.id)
+    has_logo = has_user_logo(call.from_user.id)
+    await call.message.answer(_profile_text(p, has_logo), parse_mode="HTML",
+                              reply_markup=_profile_kb(bool(p.get("channel")), has_logo))
+
+
+@dp.message(ProfileForm.set_logo, F.text == "/cancel")
+async def msg_profile_set_logo_cancel(msg: Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("Отменено.")
+
+
+@dp.message(ProfileForm.set_logo)
+async def msg_profile_set_logo(msg: Message, state: FSMContext):
+    """Accepts a photo or an image-document and saves it as the user's logo PNG."""
+    file_id = None
+    if msg.photo:
+        file_id = msg.photo[-1].file_id   # largest variant
+    elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+        file_id = msg.document.file_id
+    if not file_id:
+        await msg.answer("Нужно прислать картинку (фото или image-файл). /cancel — отменить.")
+        return
+    try:
+        f = await bot.get_file(file_id)
+        out_path = os.path.join(LOGO_DIR, f"{msg.from_user.id}.png")
+        # Download into a tmp file, normalise via PIL → PNG so any input format works.
+        tmp = f"/tmp/logo_dl_{msg.from_user.id}_{uuid.uuid4().hex}.bin"
+        await bot.download_file(f.file_path, tmp)
+        img = Image.open(tmp).convert("RGBA")
+        img.save(out_path, "PNG", optimize=True)
+        try: os.remove(tmp)
+        except OSError: pass
+    except Exception as e:
+        logger.warning(f"Logo upload failed for user {msg.from_user.id}: {e}")
+        await msg.answer(f"❌ Не получилось сохранить картинку: {e}")
+        return
+    await state.clear()
+    await msg.answer("✅ Лого сохранено. Теперь оно будет появляться на всех твоих карточках.")
+    p = get_profile(msg.from_user.id)
+    has_logo = has_user_logo(msg.from_user.id)
+    await msg.answer(_profile_text(p, has_logo), parse_mode="HTML",
+                     reply_markup=_profile_kb(bool(p.get("channel")), has_logo))
 
 
 async def _validate_user_channel(channel: str) -> tuple[bool, str]:
@@ -3791,8 +3912,9 @@ async def msg_profile_edit_value(msg: Message, state: FSMContext):
         await msg.answer(f"✓ {_field_title(field)} = <code>{txt[:50]}</code>", parse_mode="HTML")
     await state.clear()
     p = get_profile(msg.from_user.id)
-    await msg.answer(_profile_text(p), parse_mode="HTML",
-                     reply_markup=_profile_kb(bool(p.get("channel"))))
+    has_logo = has_user_logo(msg.from_user.id)
+    await msg.answer(_profile_text(p, has_logo), parse_mode="HTML",
+                     reply_markup=_profile_kb(bool(p.get("channel")), has_logo))
 
 
 # =====================================================
@@ -4006,6 +4128,7 @@ async def cmd_series(message: Message):
     loop = asyncio.get_event_loop()
     try:
         path = await loop.run_in_executor(_THREAD_POOL, generate_series_image, stats, username)
+        path = await loop.run_in_executor(_THREAD_POOL, _apply_user_logo, path, message.from_user.id)
     except Exception as e:
         logger.error(f"Series render error: {e}")
         await message.answer("Ошибка генерации сводной карточки.")

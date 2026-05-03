@@ -39,12 +39,15 @@ echo "  killed $killed instance(s) with cwd=$PNLBOT_DIR"
 sleep 2
 
 # 2. Backup runtime data so a botched copy doesn't lose user records.
-echo "→ Backing up runtime JSON…"
+echo "→ Backing up runtime JSON + logos…"
 backup_dir="$PNLBOT_DIR/_data_backup"
 mkdir -p "$backup_dir"
 for f in access.json referrals.json profiles.json history.json; do
   [ -f "$PNLBOT_DIR/$f" ] && cp "$PNLBOT_DIR/$f" "$backup_dir/"
 done
+if [ -d "$PNLBOT_DIR/logos" ]; then
+  cp -r "$PNLBOT_DIR/logos" "$backup_dir/" 2>/dev/null || true
+fi
 
 # 3. Fresh shallow clone.
 echo "→ Cloning kofman88/adjuster:$BRANCH…"

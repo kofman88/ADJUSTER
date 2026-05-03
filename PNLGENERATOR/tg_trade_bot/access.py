@@ -12,6 +12,8 @@ ACCESS_FILE = os.path.join(DATA_DIR, "access.json")
 REFERRAL_FILE = os.path.join(DATA_DIR, "referrals.json")
 PROFILE_FILE = os.path.join(DATA_DIR, "profiles.json")
 HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+LOGO_DIR     = os.path.join(DATA_DIR, "logos")
+os.makedirs(LOGO_DIR, exist_ok=True)
 HISTORY_MAX = 5
 
 TRIAL_DAYS = 2
@@ -238,3 +240,22 @@ def get_history(user_id: int) -> list:
     with open(HISTORY_FILE) as f:
         data = json.load(f)
     return data.get(str(user_id), [])
+
+
+# =====================================================
+# USER LOGO — optional PNG overlay applied to the bottom-right of every card
+# =====================================================
+def get_user_logo_path(user_id: int) -> str | None:
+    """Returns absolute path to the user's saved logo, or None if not set."""
+    p = os.path.join(LOGO_DIR, f"{user_id}.png")
+    return p if os.path.exists(p) else None
+
+
+def has_user_logo(user_id: int) -> bool:
+    return os.path.exists(os.path.join(LOGO_DIR, f"{user_id}.png"))
+
+
+def clear_user_logo(user_id: int):
+    p = os.path.join(LOGO_DIR, f"{user_id}.png")
+    if os.path.exists(p):
+        os.remove(p)
