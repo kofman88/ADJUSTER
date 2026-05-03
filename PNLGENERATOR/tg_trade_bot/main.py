@@ -1831,9 +1831,19 @@ def generate_custom_bybit_image(data: dict) -> str:
     ph = max(50, (bb[3] - bb[1]) + pad_y * 2)
     px = int(62 + sym_w + 28)
     py = sym_y_center
-    draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
-                           radius=ph // 2, fill=PILL_BG)
-    # No stroke — the reference pill text is THIN, not bolded.
+    # Reference pill is SEMI-TRANSPARENT — chart-grid lines are visible
+    # through the pill bg. Draw on an alpha overlay (alpha ≈ 200/255 ≈ 78%
+    # opacity) and composite, so the underlying grid shows through subtly.
+    pill_box = (px, py - ph // 2, px + pw, py + ph // 2)
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ImageDraw.Draw(overlay).rounded_rectangle(
+        pill_box, radius=ph // 2, fill=(*PILL_BG, 200)
+    )
+    img_rgba = img.convert("RGBA")
+    img_rgba.alpha_composite(overlay)
+    img.paste(img_rgba.convert("RGB"))
+    # Re-bind draw on the (re-pasted) RGB image and draw the pill text on top.
+    draw = ImageDraw.Draw(img)
     draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font,
               anchor="mm")
 
