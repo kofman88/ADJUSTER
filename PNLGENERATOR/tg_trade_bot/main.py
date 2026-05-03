@@ -2144,32 +2144,30 @@ def generate_custom_bingx_image(data: dict) -> str:
     w, h = img.size  # 1800x1800
     draw = ImageDraw.Draw(img)
 
-    # Wipe the dynamic-text zones by copying a clean strip from immediately
-    # above each zone (or below, if there's no room). This preserves any subtle
-    # background gradient instead of leaving a visible flat-fill rectangle.
+    # Wipe the dynamic-text zones. BINGX_Custom_*.JPG background is uniform
+    # near-black with no chart grid, so a flat-fill works — but the bg colour
+    # varies subtly across variants (whale/dot/football) and across y bands.
+    # Sample a bg colour PER ZONE from the zone's left margin (x=10..40,
+    # always clean of any text or artwork) so the wipe blends in cleanly.
     text_zones = [
-        (98,  470,  720, 540),   # Header: "Реализованная / Нереализованная П/У"
-        (98,  605, 1100, 680),   # Symbol │ Side │ Lev row
-        (98,  790, 1080, 960),   # Big PnL "+224.11%"
-        (98, 1060,  870, 1130),  # Price 1 (label + value)
-        (98, 1175,  870, 1240),  # Price 2 (label + value)
-        (270, 1560, 700, 1620),  # Username "CHM_LAB"
-        (270, 1655, 450, 1710),  # Date "05-02"
-        (900, 1550, 1525, 1620), # Referral label "Реферальный код"
-        (1300, 1645, 1525, 1700),# Referral code "D1BFA4"
+        (98,  468,  830, 545),   # Header (covers 'Нереализованная П/У' to x=798)
+        (98,  600, 1100, 690),   # Symbol │ Side │ Lev row (Russian descenders)
+        (98,  788, 1080, 962),   # Big PnL "+224.11%" / "-100.79%"
+        (98, 1056,  890, 1135),  # Price 1 (label + value)
+        (98, 1170,  890, 1245),  # Price 2 (label + value)
+        (270, 1558, 700, 1625),  # Username "CHM_LAB"
+        (270, 1653, 450, 1715),  # Date "05-02"
+        (900, 1548, 1530, 1625), # Referral label "Реферальный код"
+        (1290, 1643, 1530, 1705),# Referral code "D1BFA4"
     ]
+    px = img.load()
     for x1, y1, x2, y2 in text_zones:
-        zone_h = y2 - y1
-        # Try a clean strip ABOVE the zone first (clear of artwork on the left).
-        sample_top = y1 - zone_h - 4
-        sample_bot = y1 - 4
-        if sample_top < 0:
-            # Fall back to strip BELOW the zone.
-            sample_top = y2 + 4
-            sample_bot = sample_top + zone_h
-        strip = img.crop((x1, sample_top, x2, sample_bot))
-        img.paste(strip, (x1, y1))
-    draw = ImageDraw.Draw(img)
+        # Sample 5 pixels from the left margin (x=10..40) at the zone's mid-y
+        # and pick the median — robust to any stray bright pixel.
+        mid_y = (y1 + y2) // 2
+        samples = sorted(px[x, mid_y] for x in (10, 18, 26, 34, 42))
+        bg_local = samples[len(samples) // 2]
+        draw.rectangle([x1, y1, x2, y2], fill=bg_local)
 
     fp_r = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Regular.otf")
     fp_b = os.path.join(BASE_DIR, "fonts", "SF_Pro_Display_Semibold.otf")
