@@ -267,6 +267,7 @@ def get_main_kb() -> InlineKeyboardMarkup:
         kb = InlineKeyboardBuilder()
         kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
         kb.button(text="🕘 История", callback_data="history_show")
+        kb.button(text="📊 Сводка", callback_data="series_show")
         kb.button(text="👤 Профиль", callback_data="profile_show")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
@@ -292,6 +293,7 @@ async def start(message: Message):
         kb = InlineKeyboardBuilder()
         kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
         kb.button(text="🕘 История", callback_data="history_show")
+        kb.button(text="📊 Сводка", callback_data="series_show")
         kb.button(text="👤 Профиль", callback_data="profile_show")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
@@ -1448,6 +1450,7 @@ async def trial_access(call: CallbackQuery):
         kb = InlineKeyboardBuilder()
         kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
         kb.button(text="🕘 История", callback_data="history_show")
+        kb.button(text="📊 Сводка", callback_data="series_show")
         kb.button(text="👤 Профиль", callback_data="profile_show")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
@@ -3799,6 +3802,159 @@ async def cb_history_use(call: CallbackQuery, state: FSMContext):
     try: await call.message.delete()
     except Exception: pass
     await _render_preview(call.message, state)
+
+
+# =====================================================
+# SERIES SUMMARY — aggregate last N closed trades into a single share-card
+# =====================================================
+def _series_pnl_pct(sig: dict) -> float | None:
+    """Reconstruct the same NET ROI the user saw on each card.
+    Returns None if any field is missing/unparseable."""
+    try:
+        entry = float(sig["entry"]); exit_price = float(sig["exit"])
+        lev = float(str(sig.get("leverage", "1x")).lower().replace("x", ""))
+        side = sig.get("side", "long")
+        exch = sig.get("exchange", "bybit")
+        _, _, net = compute_pnl_breakdown(entry, exit_price, lev, side, exch)
+        return net
+    except (KeyError, ValueError, ZeroDivisionError, TypeError):
+        return None
+
+
+def _series_stats(items: list) -> dict:
+    """Aggregate stats over a list of saved signals.
+    Sum of percent ROIs is dimensionally OK because each came from the same
+    isolated-margin model — it represents `total_pnl / single_position_margin`,
+    which is what users mean when they say "за неделю +185%"."""
+    rows: list[dict] = []
+    wins = 0; losses = 0; total_pct = 0.0
+    for sig in items:
+        pct = _series_pnl_pct(sig)
+        if pct is None: continue
+        rows.append({
+            "symbol": sig.get("symbol", "?"),
+            "side":   sig.get("side", "long"),
+            "lev":    sig.get("leverage", "—"),
+            "pnl":    round(pct, 2),
+        })
+        if pct > 0: wins += 1
+        elif pct < 0: losses += 1
+        total_pct += pct
+    n = len(rows)
+    return {
+        "rows":      rows,
+        "n":         n,
+        "wins":      wins,
+        "losses":    losses,
+        "win_rate":  round(wins / n * 100, 1) if n else 0.0,
+        "total":     round(total_pct, 2),
+    }
+
+
+def generate_series_image(stats: dict, username: str = "") -> str:
+    """Render a 1080x1080 share-card summarising the user's last N trades.
+    Layout: dark canvas → title → stats triplet (count / win-rate / Σ-ROI)
+    → list of trade rows (max 7) → footer."""
+    W, H = 1080, 1080
+    BG       = (21, 21, 30)
+    FG       = (235, 236, 240)
+    DIM      = (140, 142, 155)
+    GREEN    = (5, 196, 109)
+    RED      = (255, 64, 78)
+    DIVIDER  = (44, 46, 60)
+
+    img  = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(img)
+
+    bold = lambda s: _load_font(os.path.join(BASE_DIR, "fonts/SF_Pro_Display_Semibold.otf"), s)
+    reg  = lambda s: _load_font(os.path.join(BASE_DIR, "fonts/SF_Pro_Display_Regular.otf"), s)
+
+    # Header
+    draw.text((W // 2, 90), "СВОДКА", fill=FG, font=bold(72), anchor="mm")
+    if username:
+        draw.text((W // 2, 165), f"@{username.lstrip('@')}",
+                  fill=DIM, font=reg(36), anchor="mm")
+
+    # Stats triplet
+    y_stats = 270
+    third = W // 3
+    cells = [
+        ("СДЕЛОК",   f"{stats['n']}",                       FG),
+        ("WIN-RATE", f"{stats['win_rate']:.0f}%",           FG),
+        ("ИТОГО",    f"{stats['total']:+.2f}%",             GREEN if stats['total'] >= 0 else RED),
+    ]
+    for i, (label, value, colour) in enumerate(cells):
+        cx = third * i + third // 2
+        draw.text((cx, y_stats),       label, fill=DIM, font=reg(30),  anchor="mm")
+        draw.text((cx, y_stats + 70),  value, fill=colour, font=bold(64), anchor="mm")
+
+    # Divider
+    draw.rectangle([(60, 410), (W - 60, 412)], fill=DIVIDER)
+
+    # Trade list
+    rows = stats["rows"][:7]
+    row_h = 90
+    y0 = 460
+    for i, r in enumerate(rows):
+        y = y0 + i * row_h
+        side_ru = "Лонг" if r["side"] == "long" else "Шорт"
+        side_col = GREEN if r["side"] == "long" else RED
+        pnl_col  = GREEN if r["pnl"] >= 0 else RED
+        # Symbol
+        draw.text((100, y), r["symbol"], fill=FG, font=bold(44), anchor="lm")
+        # Side
+        draw.text((420, y), side_ru, fill=side_col, font=reg(36), anchor="lm")
+        # Leverage
+        draw.text((600, y), str(r["lev"]), fill=DIM, font=reg(34), anchor="lm")
+        # PnL right-aligned
+        draw.text((W - 100, y), f"{r['pnl']:+.2f}%", fill=pnl_col, font=bold(48), anchor="rm")
+
+    # Footer
+    if not rows:
+        draw.text((W // 2, H // 2 + 60),
+                  "Нет закрытых сделок в истории.",
+                  fill=DIM, font=reg(34), anchor="mm")
+    else:
+        draw.text((W // 2, H - 60),
+                  f"последние {len(rows)} сделок",
+                  fill=DIM, font=reg(28), anchor="mm")
+
+    out = f"/tmp/series_{uuid.uuid4().hex}.png"
+    img.save(out, "PNG")
+    return out
+
+
+@dp.message(Command("series"))
+async def cmd_series(message: Message):
+    items = get_history(message.from_user.id)
+    if not items:
+        await message.answer("📭 История пуста — сначала создай хотя бы один скрин.")
+        return
+    stats = _series_stats(items)
+    if stats["n"] == 0:
+        await message.answer("Не смог посчитать ни одной сделки из истории — данные битые.")
+        return
+    profile = get_profile(message.from_user.id)
+    username = profile.get("username", "")
+    loop = asyncio.get_event_loop()
+    try:
+        path = await loop.run_in_executor(_THREAD_POOL, generate_series_image, stats, username)
+    except Exception as e:
+        logger.error(f"Series render error: {e}")
+        await message.answer("Ошибка генерации сводной карточки.")
+        return
+    summary = (
+        f"📊 <b>Сводка</b>: {stats['n']} сделок, "
+        f"win-rate {stats['win_rate']:.0f}%, "
+        f"суммарно <b>{stats['total']:+.2f}%</b>"
+    )
+    await message.answer_photo(FSInputFile(path), caption=summary, parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "series_show")
+async def cb_series_show(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await cmd_series(call.message)
 
 
 # =====================================================
