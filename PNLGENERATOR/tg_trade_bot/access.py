@@ -10,6 +10,9 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 ACCESS_FILE = os.path.join(DATA_DIR, "access.json")
 REFERRAL_FILE = os.path.join(DATA_DIR, "referrals.json")
+PROFILE_FILE = os.path.join(DATA_DIR, "profiles.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
+HISTORY_MAX = 5
 
 TRIAL_DAYS = 2
 FULL_DAYS = 30
@@ -166,3 +169,72 @@ def get_referral_stats(user_id: int) -> tuple[int, int]:
     data = refs.get(str(user_id), {"used_by": []})
     count = len(data.get("used_by", []))
     return count, max(0, 3 - count)
+
+
+# =====================================================
+# USER PROFILE (saved defaults: username / referral / favorite exchange)
+# =====================================================
+def get_profile(user_id: int) -> dict:
+    """Returns saved profile dict (may contain username/referral/exchange) or {}."""
+    if not os.path.exists(PROFILE_FILE):
+        return {}
+    with open(PROFILE_FILE) as f:
+        data = json.load(f)
+    return data.get(str(user_id), {})
+
+
+def update_profile(user_id: int, **fields):
+    """Merge non-None fields into saved profile.
+    Pass field="" to explicitly clear a single field; pass None to leave unchanged."""
+    if os.path.exists(PROFILE_FILE):
+        with open(PROFILE_FILE) as f:
+            data = json.load(f)
+    else:
+        data = {}
+    p = data.get(str(user_id), {})
+    for k, v in fields.items():
+        if v is not None:
+            p[k] = v
+    data[str(user_id)] = p
+    with open(PROFILE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def clear_profile(user_id: int):
+    """Remove user profile entirely."""
+    if not os.path.exists(PROFILE_FILE):
+        return
+    with open(PROFILE_FILE) as f:
+        data = json.load(f)
+    if data.pop(str(user_id), None) is not None:
+        with open(PROFILE_FILE, "w") as f:
+            json.dump(data, f, indent=2)
+
+
+# =====================================================
+# SIGNAL HISTORY (last N rendered cards per user, for "Repeat last")
+# =====================================================
+def add_history(user_id: int, signal: dict):
+    """Save a rendered signal (newest first, capped at HISTORY_MAX)."""
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE) as f:
+            data = json.load(f)
+    else:
+        data = {}
+    user_history = data.get(str(user_id), [])
+    # Strip transient/internal keys (start with _) before persisting.
+    entry = {k: v for k, v in signal.items() if not str(k).startswith("_")}
+    entry["_ts"] = datetime.now().isoformat()
+    user_history.insert(0, entry)
+    data[str(user_id)] = user_history[:HISTORY_MAX]
+    with open(HISTORY_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+def get_history(user_id: int) -> list:
+    """Returns user's signal history (newest first)."""
+    if not os.path.exists(HISTORY_FILE):
+        return []
+    with open(HISTORY_FILE) as f:
+        data = json.load(f)
+    return data.get(str(user_id), [])
