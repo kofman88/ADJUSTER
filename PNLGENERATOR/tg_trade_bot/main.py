@@ -1786,7 +1786,10 @@ def generate_custom_bybit_image(data: dict) -> str:
     RED   = (255, 50, 75)
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays.
-    # Reference: WHITE, Reg 40pt, x=133 (right edge of avatar). ----
+    # Reference: WHITE, Reg 40pt, x=133 (right edge of avatar).
+    # If user skipped the username field, wipe BOTH the avatar AND the text
+    # so that area is fully blank (per user request — "имя пользователя
+    # оставалось пустым полностью"). ----
     username = str(data.get("username", "")).strip()
     if username:
         username_font = _load_font(fp_r, 40)
@@ -1794,6 +1797,10 @@ def generate_custom_bybit_image(data: dict) -> str:
         wipe_w = max(new_w, 110) + 6
         wipe(133, 188, 133 + wipe_w, 217, *BG_STRIP_LOGO)
         draw.text((133, 202), username, fill=WHITE, font=username_font, anchor="lm")
+    else:
+        # Wipe both the baked avatar circle (x=55-130) and the baked "chmst"
+        # text (x=133-260) — entire row blank.
+        wipe(55, 175, 280, 230, *BG_STRIP_LOGO)
 
     # ---- Symbol + side pill — wipe whole row, then draw symbol then pill ----
     symbol = data["symbol"].upper()
@@ -2262,10 +2269,20 @@ def generate_custom_bingx_image(data: dict) -> str:
     draw.text((val_bot_x, PRICE_BOT_Y), _fmt(data.get("entry", 0)), fill=WHITE, font=f_value, anchor="lm")
 
     # ----- Username + date (under triangle on bottom-left) -----
+    # If user opted out of the username field, also wipe the baked avatar
+    # triangle (x≈94..239) so the bottom-left area is fully blank.
     username = str(data.get("username", "")).strip()
     datetime_text = str(data.get("datetime_str", "")).strip()
     if username:
         draw.text((USER_X, USER_Y), username, fill=WHITE, font=f_username, anchor="lm")
+    else:
+        # Wipe BAKED triangle avatar (x≈85..245, y≈1555..1715) plus the
+        # username text slot. Date column (x≈260+) untouched.
+        try:
+            avatar_bg = img.getpixel((30, 1500))
+        except Exception:
+            avatar_bg = (10, 10, 10)
+        draw.rectangle([60, 1545, 260, 1720], fill=avatar_bg)
     if datetime_text:
         draw.text((USER_X, DATE_Y), datetime_text, fill=GRAY, font=f_date, anchor="lm")
 
@@ -2291,7 +2308,10 @@ async def start_custom_bybit(cb: CallbackQuery, state: FSMContext):
 
     await state.clear()
     await state.update_data(exchange="bybit")
-    msg = await cb.message.answer("👤 Введите имя пользователя:")
+    msg = await cb.message.answer(
+        "👤 Введите имя пользователя (или пропустите, чтобы оставить пустым):",
+        reply_markup=skip_kb,
+    )
     await state.update_data(custom_last_msg_id=msg.message_id)
     await state.set_state(CustomExchange.username)
 
@@ -2326,7 +2346,8 @@ async def custom_bingx_template(call: CallbackQuery, state: FSMContext):
     except Exception as e:
         logger.debug(f"Non-critical error: {e}")
     msg = await call.message.answer(
-        f"Шаблон: {BINGX_TEMPLATE_LABELS[template]}\n👤 Введите имя пользователя:"
+        f"Шаблон: {BINGX_TEMPLATE_LABELS[template]}\n👤 Введите имя пользователя (или пропустите, чтобы оставить пустым):",
+        reply_markup=skip_kb,
     )
     await state.update_data(custom_last_msg_id=msg.message_id)
     await state.set_state(CustomExchange.username)
@@ -2513,6 +2534,22 @@ async def cusdt_finish(msg: Message, state: FSMContext):
         logger.error(f"Image generation error: {e}")
         await msg.answer("Ошибка генерации изображения. Попробуйте снова.", reply_markup=restart_kb)
     await state.clear()
+
+
+@dp.callback_query(CustomExchange.username, F.data == "skip_field")
+async def skip_username(call: CallbackQuery, state: FSMContext):
+    await state.update_data(username="")
+    await call.answer()
+    try:
+        await call.message.delete()
+    except Exception as e:
+        logger.debug(f"Non-critical error: {e}")
+    data = await state.get_data()
+    new = await call.message.answer(
+        f"{build_custom_summary(data)}\n📈 Выбери направление сделки:", reply_markup=side_kb
+    )
+    await state.update_data(custom_last_msg_id=new.message_id)
+    await state.set_state(CustomExchange.side)
 
 
 @dp.message(CustomExchange.username)
