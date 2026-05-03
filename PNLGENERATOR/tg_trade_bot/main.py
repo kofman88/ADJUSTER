@@ -120,6 +120,8 @@ class SignalForm(StatesGroup):
     username    = State()
     referral    = State()
     datetime_str = State()
+    preview     = State()   # final card draft with [✏️ Edit X] / [✅ Send] / [❌ Cancel]
+    edit_value  = State()   # transient — waiting for new text/number for the field being edited
 
 BASE_H = 467
 
@@ -654,9 +656,8 @@ async def signal_datetime(msg: Message, state: FSMContext):
     await _signal_finish(msg, state)
 
 
-async def _signal_finish(msg, state: FSMContext):
-    data = await state.get_data()
-    sig = data["_sig"]
+def _build_image_data(sig: dict) -> tuple[dict, callable]:
+    """Convert SignalForm draft into image_data + the right renderer fn."""
     entry = sig["entry"]
     exit_price = sig["exit"]
     side = sig["side"]
@@ -679,20 +680,204 @@ async def _signal_finish(msg, state: FSMContext):
     if sig["exchange"] == "bingx":
         image_data["template"]     = sig.get("template", "football")
         image_data["datetime_str"] = sig.get("datetime_str", "")
-        gen_func = generate_custom_bingx_image
-    else:
-        gen_func = generate_custom_bybit_image
+        return image_data, generate_custom_bingx_image
+    return image_data, generate_custom_bybit_image
+
+
+def _preview_kb(sig: dict) -> InlineKeyboardMarkup:
+    """Inline keyboard for the draft-preview state."""
+    is_bingx = sig.get("exchange") == "bingx"
+    rows = [
+        [InlineKeyboardButton(text="✏️ Плечо",       callback_data="sig_edit:leverage"),
+         InlineKeyboardButton(text="✏️ Состояние",   callback_data="sig_edit:status")],
+        [InlineKeyboardButton(text="✏️ Биржа",       callback_data="sig_edit:exchange"),
+         InlineKeyboardButton(text="✏️ Сторона",     callback_data="sig_edit:side")],
+        [InlineKeyboardButton(text="✏️ Цена входа",  callback_data="sig_edit:entry"),
+         InlineKeyboardButton(text="✏️ Цена выхода", callback_data="sig_edit:exit")],
+        [InlineKeyboardButton(text="✏️ Имя",         callback_data="sig_edit:username"),
+         InlineKeyboardButton(text="✏️ Реф.код",     callback_data="sig_edit:referral")],
+    ]
+    if is_bingx:
+        rows.append([
+            InlineKeyboardButton(text="✏️ Шаблон",   callback_data="sig_edit:template"),
+            InlineKeyboardButton(text="✏️ Дата",     callback_data="sig_edit:datetime_str"),
+        ])
+    rows.append([
+        InlineKeyboardButton(text="✅ Отправить", callback_data="sig_send"),
+        InlineKeyboardButton(text="❌ Отмена",    callback_data="sig_cancel"),
+    ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _render_preview(msg, state: FSMContext):
+    """Render current draft, show as photo with edit/send keyboard."""
+    data = await state.get_data()
+    sig = data["_sig"]
+    image_data, gen_func = _build_image_data(sig)
     loop = asyncio.get_event_loop()
     try:
         path = await loop.run_in_executor(_THREAD_POOL, gen_func, image_data)
-        await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
-        has_access, _ = check_access(msg.from_user.id)
-        if not has_access:
-            increment_usage(msg.from_user.id)
     except Exception as e:
-        logger.error(f"Signal render error: {e}")
-        await msg.answer("Ошибка генерации картинки.", reply_markup=restart_kb)
+        logger.error(f"Preview render error: {e}")
+        await msg.answer("Ошибка генерации картинки.")
+        return
+    summary = (f"📋 <b>Черновик</b>\n"
+               f"  {sig['symbol']} • {'Лонг' if sig['side']=='long' else 'Шорт'} {sig.get('leverage','—')} • "
+               f"{image_data['pnl']:+.2f}%\n"
+               f"  Биржа: {sig.get('exchange','—')} • Состояние: "
+               f"{'Закрыта' if sig.get('status')=='closed' else 'Открыта'}\n"
+               f"  Вход: {sig['entry']} → Выход: {sig['exit']}\n"
+               f"\nТапни поле для правки или ✅ отправить.")
+    sent = await msg.answer_photo(FSInputFile(path), caption=summary,
+                                  parse_mode="HTML", reply_markup=_preview_kb(sig))
+    await state.update_data(_sig_preview_msg_id=sent.message_id)
+    await state.set_state(SignalForm.preview)
+
+
+async def _signal_finish(msg, state: FSMContext):
+    """Was: send card immediately. Now: show preview, send only on ✅."""
+    await _render_preview(msg, state)
+
+
+# ---- Preview state callbacks ----
+
+@dp.callback_query(SignalForm.preview, F.data == "sig_send")
+async def signal_preview_send(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    sig = data["_sig"]
+    image_data, gen_func = _build_image_data(sig)
+    loop = asyncio.get_event_loop()
+    try:
+        path = await loop.run_in_executor(_THREAD_POOL, gen_func, image_data)
+        await call.message.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+        has_access, _ = check_access(call.from_user.id)
+        if not has_access:
+            increment_usage(call.from_user.id)
+    except Exception as e:
+        logger.error(f"Final send render error: {e}")
+        await call.message.answer("Ошибка генерации картинки.", reply_markup=restart_kb)
+    await call.answer("✅ Отправлено")
+    try: await call.message.delete()
+    except Exception: pass
     await state.clear()
+
+
+@dp.callback_query(SignalForm.preview, F.data == "sig_cancel")
+async def signal_preview_cancel(call: CallbackQuery, state: FSMContext):
+    await call.answer("❌ Отменено")
+    try: await call.message.delete()
+    except Exception: pass
+    await state.clear()
+    await call.message.answer("Черновик удалён. /start чтобы начать заново.")
+
+
+# ---- Edit dispatchers (each field) ----
+
+_EDIT_PROMPTS = {
+    "leverage":     "Введите новое плечо (1..200):",
+    "entry":        "Введите новую цену входа:",
+    "exit":         "Введите новую цену выхода:",
+    "username":     "Введите имя пользователя (или /skip):",
+    "referral":     "Введите реферальный код (или /skip):",
+    "datetime_str": "Введите дату/время (или /skip):",
+}
+_EDIT_BUTTON_FIELDS = {"exchange", "status", "side", "template"}
+
+
+@dp.callback_query(SignalForm.preview, F.data.startswith("sig_edit:"))
+async def signal_preview_edit(call: CallbackQuery, state: FSMContext):
+    field = call.data.split(":", 1)[1]
+    await call.answer()
+    await state.update_data(_sig_editing_field=field)
+    if field in _EDIT_BUTTON_FIELDS:
+        kb = _edit_choice_kb(field)
+        await call.message.answer(f"Выбери новое значение для «{_field_title(field)}»:", reply_markup=kb)
+        # stay in preview state — choice handlers will save + re-render
+        return
+    if field in _EDIT_PROMPTS:
+        await call.message.answer(_EDIT_PROMPTS[field])
+        await state.set_state(SignalForm.edit_value)
+        return
+    await call.message.answer(f"Не знаю как редактировать поле {field!r}.")
+
+
+def _field_title(field: str) -> str:
+    return {
+        "leverage": "плечо", "entry": "цена входа", "exit": "цена выхода",
+        "username": "имя", "referral": "реф.код", "datetime_str": "дата",
+        "exchange": "биржа", "status": "состояние", "side": "сторона",
+        "template": "шаблон",
+    }.get(field, field)
+
+
+def _edit_choice_kb(field: str) -> InlineKeyboardMarkup:
+    if field == "exchange":
+        rows = [[InlineKeyboardButton(text="🟡 Bybit", callback_data="sig_setval:exchange:bybit"),
+                 InlineKeyboardButton(text="🟢 BingX", callback_data="sig_setval:exchange:bingx")]]
+    elif field == "status":
+        rows = [[InlineKeyboardButton(text="✅ Закрытая", callback_data="sig_setval:status:closed"),
+                 InlineKeyboardButton(text="⏳ Открытая", callback_data="sig_setval:status:open")]]
+    elif field == "side":
+        rows = [[InlineKeyboardButton(text="🟢 Лонг", callback_data="sig_setval:side:long"),
+                 InlineKeyboardButton(text="🔴 Шорт", callback_data="sig_setval:side:short")]]
+    elif field == "template":
+        rows = [[InlineKeyboardButton(text="🐳 Whale", callback_data="sig_setval:template:whale"),
+                 InlineKeyboardButton(text="🟢 Dot",   callback_data="sig_setval:template:dot"),
+                 InlineKeyboardButton(text="⚽ Football", callback_data="sig_setval:template:football")]]
+    else:
+        rows = []
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.startswith("sig_setval:"))
+async def signal_setval(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split(":", 2)
+    if len(parts) < 3:
+        await call.answer("bad payload", show_alert=True); return
+    _, field, value = parts
+    data = await state.get_data()
+    sig = dict(data.get("_sig", {}))
+    sig[field] = value
+    await state.update_data(_sig=sig, _sig_editing_field=None)
+    await call.answer(f"✓ {_field_title(field)} = {value}")
+    try: await call.message.delete()
+    except Exception: pass
+    # If user switched exchange to/from bingx, may need to add/remove template
+    if field == "exchange" and value == "bingx" and not sig.get("template"):
+        sig["template"] = "football"
+        await state.update_data(_sig=sig)
+    await _render_preview(call.message, state)
+
+
+@dp.message(SignalForm.edit_value)
+async def signal_edit_value(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get("_sig_editing_field")
+    if not field:
+        await msg.answer("Не знаю что редактирую — нажми /start заново.")
+        await state.clear(); return
+    txt = (msg.text or "").strip()
+    if txt == "/skip":
+        new_val = ""
+    elif field == "leverage":
+        try:
+            v = float(txt.lower().replace("x", ""))
+            if v < 1 or v > 200: raise ValueError
+            new_val = f"{v:g}x"
+        except ValueError:
+            await msg.answer("Введите число от 1 до 200.")
+            return
+    elif field in ("entry", "exit"):
+        v = await parse_float(msg)
+        if v is None: return
+        new_val = v
+    else:  # username, referral, datetime_str
+        new_val = txt[:50]
+    sig = dict(data.get("_sig", {}))
+    sig[field] = new_val
+    await state.update_data(_sig=sig, _sig_editing_field=None)
+    await safe_delete_message(msg)
+    await _render_preview(msg, state)
 
 
 @dp.message(Command("test_all"))
