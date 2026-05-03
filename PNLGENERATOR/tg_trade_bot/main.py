@@ -2217,10 +2217,13 @@ def generate_custom_bybit_image(data: dict) -> str:
     #   pill:     Bold 36pt, green/red text, pill bg=(27,27,27), Bold pill text size 36
     #   PnL:      Bold 104pt, brand green/red, x=68, y_center=506
     #   value:    Bold 46pt, white, x=62, y_center=690 / 816
-    # Brand colours sampled from the JPGs:
-    #   green = (15, 222, 140), red = (255, 50, 75) — overrides the constants above
-    GREEN = (15, 222, 140)
-    RED   = (255, 50, 75)
+    # Brand colours — sampled from the DOMINANT fill colour of the ref PnL letters
+    # (not the brightest anti-alias edge). Earlier (15,222,140)/(255,50,75) were
+    # outline/AA values and rendered slightly too neon vs the ref core fill.
+    #   green: (5, 196, 109) — most common in +12.72% (71x), darker emerald
+    #   red:   (255, 64, 78) — most common in -100.79% (46x)
+    GREEN = (5, 196, 109)
+    RED   = (255, 64, 78)
 
     # ---- Username ("chmst" → custom). Avatar at x=61-128 stays.
     # Reference: WHITE, Reg 40pt, x=133 (right edge of avatar).
