@@ -2528,6 +2528,21 @@ def parse_signal(text: str) -> dict:
     elif _re_signal.search(r'\bЛОНГ\b|\bLONG\b', t, _re_signal.I) or '📈' in t:
         out["side"] = "long"
 
+    # Pass 3 (last resort) — if side is detected but symbol still isn't, accept
+    # the first standalone alphanumeric token at the start of any line as the
+    # symbol. Handles compact channel format: "LAB LONG 1.49 ...", "PEPE Шорт".
+    # Bounded by side-presence so random capitalised words don't trigger.
+    if not out["symbol"] and out["side"]:
+        for line in t.split('\n'):
+            line = line.strip()
+            if not line: continue
+            m = _re_signal.match(r'^\$?([A-Za-z][A-Za-z0-9]{1,9})\b', line)
+            if m:
+                cand = m.group(1).upper()
+                if cand in _SIGNAL_BLACKLIST: continue
+                out["symbol"] = cand if cand.endswith("USDT") else cand + "USDT"
+                break
+
     def find_num_after(keywords):
         for kw in keywords:
             for m in _re_signal.finditer(_re_signal.escape(kw), t, _re_signal.I):
@@ -2559,6 +2574,22 @@ def parse_signal(text: str) -> dict:
             seen_offsets.add(m.start())
             n = _re_signal.search(_SIGNAL_NUMBER_RX, t[m.end():m.end()+80])
             if n: add_tp(_parse_number(n.group()))
+
+    # Last-resort number harvest — if side is found but no Entry/TP keywords
+    # gave us anything, consume raw numbers in document order: 1st = entry,
+    # 2..6 = TPs (the SL value, if known, is excluded). Handles channel
+    # formats like "LAB LONG 1.49 1,77 2,21 3,77 Стоп 1,025".
+    if out["side"] and out["entry"] is None and not out["tps"]:
+        found = []
+        for m in _re_signal.finditer(_SIGNAL_NUMBER_RX, t):
+            v = _parse_number(m.group())
+            if v and v > 0 and v not in found:
+                found.append(v)
+        if out["sl"] in found:
+            found.remove(out["sl"])
+        if found:
+            out["entry"] = found[0]
+            out["tps"] = found[1:6]
     return out
 
 
@@ -4222,6 +4253,24 @@ async def signal_auto_detect(msg: Message, state: FSMContext):
     text = msg.text or ""
     if looks_like_signal(text):
         await _handle_signal_text(msg, state, text)
+        return
+    # The text wasn't a clean signal but the user might have tried — give a
+    # specific hint if at least one signal-like marker is present (a side
+    # keyword or a $TICKER), instead of silently swallowing the message.
+    parsed = parse_signal(text)
+    if parsed.get("side") or parsed.get("symbol"):
+        missing = []
+        if not parsed.get("symbol"): missing.append("символ")
+        if not parsed.get("side"):   missing.append("сторона (LONG/SHORT)")
+        if parsed.get("entry") is None and not parsed.get("tps"):
+            missing.append("цены")
+        await msg.answer(
+            "Похоже на сигнал, но не нашёл: <b>" + ", ".join(missing) + "</b>.\n\n"
+            "Минимум: <code>BTC LONG 78000</code>\n"
+            "Лучше:\n"
+            "<code>BTC LONG\nВход 78000\nСтоп 79000\nTP1 76000</code>",
+            parse_mode="HTML",
+        )
 
 
 @dp.inline_query()
