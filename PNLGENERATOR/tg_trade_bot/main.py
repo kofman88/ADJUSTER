@@ -2311,8 +2311,13 @@ def generate_custom_bybit_image(data: dict) -> str:
     # The base reference JPG always has "Текущая цена" baked in. For closed trades
     # the user expects "Цена выхода" — overwrite the label.
     if data.get("status") == "closed":
-        # Reference label bbox: y=759-776, x≈62-260. Wipe the row and redraw.
-        wipe(45, 752, 340, 783, *BG_STRIP_SUB)
+        # Reference layout:
+        #   y=751..752: tiny info-mark (matches the one above "Цена входа")
+        #   y=755..757: anti-alias halo of "Текущая" letters
+        #   y=758..776: label "Текущая цена" main body
+        # Wipe y=754..783 — preserves the mark above and removes the label
+        # (including its halo).
+        wipe(45, 754, 340, 783, *BG_STRIP_SUB)
         label_font = _load_font(fp_r, 32)
         draw.text((62, 768), "Цена выхода", fill=GRAY, font=label_font, anchor="lm")
 
