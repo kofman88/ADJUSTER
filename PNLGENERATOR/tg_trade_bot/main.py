@@ -716,26 +716,62 @@ async def signal_datetime(msg: Message, state: FSMContext):
     await _signal_advance(msg, state)
 
 
+# =====================================================
+# FEES — match each exchange's default Taker rate so the displayed ROI mirrors
+# the exchange's "Closed PnL" / «Закрытый PnL» view (which is already net of
+# entry+exit trading fees). VIP tier discounts aren't modelled — these are the
+# spot-VIP-0 taker rates published by each exchange as of late-2025.
+# =====================================================
+BYBIT_TAKER_RATE = 0.00055   # 0.055% per leg
+BINGX_TAKER_RATE = 0.00050   # 0.050% per leg
+
+
+def compute_pnl_breakdown(entry: float, exit_price: float, leverage: float,
+                          side: str, exchange: str) -> tuple[float, float, float]:
+    """Return (gross_pct, fee_pct, net_pct).
+
+    Math (USDT-margined linear perp, isolated):
+      gross_pct = ((exit-entry)/entry) × leverage × 100        (LONG; mirrored for SHORT)
+      fee_pct   = ((entry+exit)/entry) × taker × leverage × 100
+                ≈ 2 × taker × leverage × 100 when entry≈exit; the exact form
+                handles big swings correctly because the closing notional uses
+                the exit price.
+      net_pct   = gross_pct - fee_pct
+    """
+    if side == "long":
+        gross_pct = ((exit_price - entry) / entry) * leverage * 100
+    else:
+        gross_pct = ((entry - exit_price) / entry) * leverage * 100
+    rate = BYBIT_TAKER_RATE if exchange == "bybit" else BINGX_TAKER_RATE
+    fee_pct = ((entry + exit_price) / entry) * rate * leverage * 100
+    return gross_pct, fee_pct, gross_pct - fee_pct
+
+
 def _build_image_data(sig: dict) -> tuple[dict, callable]:
-    """Convert SignalForm draft into image_data + the right renderer fn."""
+    """Convert SignalForm draft into image_data + the right renderer fn.
+    The displayed `pnl` is NET-of-fees so it matches the exchange's «Закрытый PnL»
+    view. The pre-fee gross and the deducted fee are also returned via
+    `pnl_gross` / `pnl_fee_pct` for the caption breakdown."""
     entry = sig["entry"]
     exit_price = sig["exit"]
     side = sig["side"]
     lev_raw = sig.get("leverage", "1x").lower().replace("x", "")
     try: leverage = float(lev_raw)
     except ValueError: leverage = 1.0
-    pnl_percent = ((exit_price - entry) / entry * 100) * leverage if side == "long" \
-                  else ((entry - exit_price) / entry * 100) * leverage
+    gross_pct, fee_pct, net_pct = compute_pnl_breakdown(
+        entry, exit_price, leverage, side, sig["exchange"])
     image_data = {
-        "username": sig.get("username", ""),
-        "symbol":   sig["symbol"],
-        "pnl":      round(pnl_percent, 2),
-        "entry":    entry,
-        "exit":     exit_price,
-        "side":     side,
-        "referral": sig.get("referral", ""),
-        "leverage": sig["leverage"],
-        "status":   sig.get("status", "closed"),
+        "username":     sig.get("username", ""),
+        "symbol":       sig["symbol"],
+        "pnl":          round(net_pct, 2),
+        "pnl_gross":    round(gross_pct, 2),
+        "pnl_fee_pct":  round(fee_pct, 2),
+        "entry":        entry,
+        "exit":         exit_price,
+        "side":         side,
+        "referral":     sig.get("referral", ""),
+        "leverage":     sig["leverage"],
+        "status":       sig.get("status", "closed"),
     }
     if sig["exchange"] == "bingx":
         image_data["template"]     = sig.get("template", "football")
@@ -781,13 +817,19 @@ async def _render_preview(msg, state: FSMContext):
         logger.error(f"Preview render error: {e}")
         await msg.answer("Ошибка генерации картинки.")
         return
-    summary = (f"📋 <b>Черновик</b>\n"
-               f"  {sig['symbol']} • {'Лонг' if sig['side']=='long' else 'Шорт'} {sig.get('leverage','—')} • "
-               f"{image_data['pnl']:+.2f}%\n"
-               f"  Биржа: {sig.get('exchange','—')} • Состояние: "
-               f"{'Закрыта' if sig.get('status')=='closed' else 'Открыта'}\n"
-               f"  Вход: {sig['entry']} → Выход: {sig['exit']}\n"
-               f"\nТапни поле для правки или ✅ отправить.")
+    rate_pct = (BYBIT_TAKER_RATE if sig.get('exchange') == 'bybit'
+                else BINGX_TAKER_RATE) * 100
+    summary = (
+        f"📋 <b>Черновик</b>\n"
+        f"  {sig['symbol']} • {'Лонг' if sig['side']=='long' else 'Шорт'} "
+        f"{sig.get('leverage','—')} • <b>{image_data['pnl']:+.2f}%</b>\n"
+        f"  Грязный: {image_data['pnl_gross']:+.2f}% • "
+        f"Комиссия: −{image_data['pnl_fee_pct']:.2f}% (taker {rate_pct:.3f}% × 2)\n"
+        f"  Биржа: {sig.get('exchange','—')} • Состояние: "
+        f"{'Закрыта' if sig.get('status')=='closed' else 'Открыта'}\n"
+        f"  Вход: {sig['entry']} → Выход: {sig['exit']}\n"
+        f"\nТапни поле для правки или ✅ отправить."
+    )
     sent = await msg.answer_photo(FSInputFile(path), caption=summary,
                                   parse_mode="HTML", reply_markup=_preview_kb(sig))
     await state.update_data(_sig_preview_msg_id=sent.message_id)
@@ -1010,7 +1052,7 @@ async def _run_spot_test(message: Message, exchange: str, side: str):
 
     qty = calculate_qty(exchange, amount, entry, leverage)
     cost = calculate_cost(exchange, amount, leverage)
-    pnl_usdt, margin_pos, percent = calculate_pnl_linear(entry, mark, qty, side, leverage)
+    pnl_usdt, margin_pos, percent = calculate_pnl_linear(entry, mark, qty, side, leverage, exchange)
     pnl = percent
     liquidation = calculate_liquidation(entry, leverage, side)
 
@@ -1257,12 +1299,7 @@ async def _run_custom_usdt_test(message: Message, side: str):
     exit_price = 0.1092 if side == "long" else 0.1040
     leverage = 50.0
     deposit = 1000.0
-
-    if side == "long":
-        pnl_percent = ((exit_price - entry) / entry * 100) * leverage
-    else:
-        pnl_percent = ((entry - exit_price) / entry * 100) * leverage
-
+    _, _, pnl_percent = compute_pnl_breakdown(entry, exit_price, leverage, side, "bybit")
     pnl_usdt = pnl_percent / 100 * deposit
 
     image_data = {
@@ -1535,7 +1572,7 @@ async def get_leverage(message: Message, state: FSMContext):
     qty = calculate_qty(data["exchange"], data["amount"], data["entry"], leverage)
     cost = calculate_cost(data["exchange"], data["amount"], leverage)
     pnl_usdt, margin_pos, percent = calculate_pnl_linear(
-        data["entry"], data["mark"], qty, data["side"], leverage
+        data["entry"], data["mark"], qty, data["side"], leverage, data.get("exchange", "bybit")
     )
     liquidation = calculate_liquidation(data["entry"], leverage, data["side"])
     data.update(leverage=leverage, qty=qty, liquidation=liquidation, cost=cost)
@@ -1700,10 +1737,16 @@ def calculate_cost(exchange: str, amount: float, leverage: int | float) -> float
     return round(amount * leverage, 2)
 
 def calculate_pnl_linear(
-    entry: float, mark: float, qty: float, side: str, leverage: float
+    entry: float, mark: float, qty: float, side: str, leverage: float,
+    exchange: str = "bybit",
 ) -> tuple[float, float, float]:
-    pnl_usd = qty * (mark - entry) if side == "long" else qty * (entry - mark)
+    """USDT-margined linear-perp PnL with taker fees subtracted on both legs,
+    so the returned ROI matches the exchange's «Закрытый PnL» view."""
+    gross_usd = qty * (mark - entry) if side == "long" else qty * (entry - mark)
     margin = (entry * qty / leverage) if leverage and entry else 0.0
+    rate = BYBIT_TAKER_RATE if exchange == "bybit" else BINGX_TAKER_RATE
+    fee_usd = qty * (entry + mark) * rate
+    pnl_usd = gross_usd - fee_usd
     pnl_percent = (pnl_usd / margin * 100) if margin > 0 else 0.0
     return round(pnl_usd, 4), round(margin, 4), round(pnl_percent, 2)
 
@@ -3233,12 +3276,8 @@ async def cusdt_finish(msg: Message, state: FSMContext):
     except ValueError:
         leverage = 1.0
 
-    pnl_percent = (
-        ((exit_price - entry) / entry * 100) * leverage
-        if side == "long"
-        else ((entry - exit_price) / entry * 100) * leverage
-    )
-    pnl_usdt = pnl_percent / 100 * deposit_val
+    _, _, net_pct = compute_pnl_breakdown(entry, exit_price, leverage, side, "bybit")
+    pnl_usdt = net_pct / 100 * deposit_val
 
     image_data = {
         "username": data["username"],
@@ -3483,15 +3522,11 @@ async def custom_finish(msg: Message, state: FSMContext):
         leverage = float(leverage_raw) if leverage_raw else 1.0
     except ValueError:
         leverage = 1.0
-    pnl_percent = (
-        ((exit_price - entry) / entry * 100) * leverage
-        if side == "long"
-        else ((entry - exit_price) / entry * 100) * leverage
-    )
+    _, _, net_pct = compute_pnl_breakdown(entry, exit_price, leverage, side, exchange)
     image_data = {
         "username": data["username"],
         "symbol": data["symbol"],
-        "pnl": round(pnl_percent, 2),
+        "pnl": round(net_pct, 2),
         "entry": entry,
         "exit": exit_price,
         "entry_str": data.get("entry_str", ""),
