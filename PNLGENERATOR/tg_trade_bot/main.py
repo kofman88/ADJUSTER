@@ -1813,10 +1813,18 @@ def generate_custom_bybit_image(data: dict) -> str:
 
     # Pill — Bold 36 (185 vs ref 184 width). Pad/radius tuned for ref pill height ~50.
     # User's references use Russian "Лонг"/"Шорт" instead of English Long/Short.
-    pill_text_color = GREEN if is_long else RED
+    # Pill text uses MUTED brand colours (sampled from brightest pixels of ref
+    # pill text — JPG-degraded values that the user's reference actually shows):
+    #   green pill: (43, 197, 124)   red pill: (211, 78, 105)
+    # Vivid PnL colours (15,222,140)/(255,50,75) make the pill look TOO bold
+    # vs reference (the user explicitly flagged this).
+    PILL_GREEN = (43, 197, 124)
+    PILL_RED   = (211, 78, 105)
+    pill_text_color = PILL_GREEN if is_long else PILL_RED
     leverage_num = float(str(data.get("leverage", "1")).replace("x", "").replace("X", ""))
     pill_text = ("Лонг" if is_long else "Шорт") + f" {leverage_num:.1f}X"
-    pill_font = _load_font(fp_b, 36)
+    # Reg 38 — matches reference pill text weight (thin, not bold) and width 188≈ref 184.
+    pill_font = _load_font(fp_r, 38)
     pad_x, pad_y = 26, 9
     bb = draw.textbbox((0, 0), pill_text, font=pill_font)
     pw = (bb[2] - bb[0]) + pad_x * 2
@@ -1825,11 +1833,9 @@ def generate_custom_bybit_image(data: dict) -> str:
     py = sym_y_center
     draw.rounded_rectangle((px, py - ph // 2, px + pw, py + ph // 2),
                            radius=ph // 2, fill=PILL_BG)
-    # stroke_width=1 thickens the glyph stroke by one pixel — keeps the pill text
-    # readable / un-translucent after Telegram re-encodes the PNG as JPG
-    # (fixes "оно чуть просвечивает" complaint).
+    # No stroke — the reference pill text is THIN, not bolded.
     draw.text((px + pw // 2, py), pill_text, fill=pill_text_color, font=pill_font,
-              anchor="mm", stroke_width=1, stroke_fill=pill_text_color)
+              anchor="mm")
 
     # ---- Big ROI value (+12.72% / +8.97% / -100.79% etc.) ----
     # Reference +12.72% bbox: x=68-468 w=401. Bold size 106 + anchor x=62
