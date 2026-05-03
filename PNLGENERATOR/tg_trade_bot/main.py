@@ -28,8 +28,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
 from aiogram.types import (
     Message,
+    BotCommand,
+    MenuButtonCommands,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
     CallbackQuery,
     FSInputFile,
     InlineQuery,
@@ -186,6 +190,59 @@ if not TOKEN:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
+
+
+# =====================================================
+# PERSISTENT REPLY KEYBOARD — always visible at the bottom of the chat so the
+# user never has to type /start. Buttons send their text as a regular message;
+# the dispatcher catches them via menu_button_handler below.
+# =====================================================
+MENU_BTN_QUICK   = "⚡ Быстрый скрин"
+MENU_BTN_SERIES  = "📊 Сводка"
+MENU_BTN_HISTORY = "🕘 История"
+MENU_BTN_PROFILE = "👤 Профиль"
+MENU_BTN_TEXTS = {MENU_BTN_QUICK, MENU_BTN_SERIES, MENU_BTN_HISTORY, MENU_BTN_PROFILE}
+
+MAIN_MENU_RKB = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text=MENU_BTN_QUICK),   KeyboardButton(text=MENU_BTN_HISTORY)],
+        [KeyboardButton(text=MENU_BTN_SERIES),  KeyboardButton(text=MENU_BTN_PROFILE)],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+    input_field_placeholder="Меню или сигнал…",
+)
+
+
+@dp.message(F.text.in_(MENU_BTN_TEXTS))
+async def menu_button_handler(msg: Message, state: FSMContext):
+    """Highest-priority handler — clears any in-progress FSM and routes the
+    user to the requested screen. Registered BEFORE every other @dp.message
+    so a tap always wins over partial-FSM input."""
+    if await state.get_state() is not None:
+        await state.clear()
+    btn = msg.text
+    if btn == MENU_BTN_QUICK:
+        await msg.answer(
+            "⚡ <b>Быстрый скрин</b>\n\n"
+            "Пришли следующим сообщением сигнал в любом формате — бот сам распознает.\n"
+            "Минимум: символ + сторона + цены.\n\n"
+            "<b>Пример:</b>\n"
+            "<code>BTCUSDT\nШорт\nВход: 78373\nСтоп: 79546\nTP1: 76613</code>",
+            parse_mode="HTML",
+        )
+    elif btn == MENU_BTN_HISTORY:
+        await cmd_history(msg)
+    elif btn == MENU_BTN_SERIES:
+        await cmd_series(msg)
+    elif btn == MENU_BTN_PROFILE:
+        await cmd_profile(msg)
+
+
+@dp.message(Command("menu"))
+async def cmd_menu(msg: Message):
+    """Backup command — same as /start but explicit."""
+    await start(msg)
 # =====================================================
 # МАРАФОН (в памяти — при необходимости перенести в Redis)
 # =====================================================
@@ -339,6 +396,12 @@ async def start(message: Message):
         kb.button(text="🎨 Кастом BingX", callback_data="custom_bingx")
         kb.button(text="🏁 Марафон", callback_data="marathon:menu")
         kb.adjust(1)
+        # 1) Persistent reply-keyboard sticks at the bottom of the chat (sent
+        #    once, here). 2) Inline keyboard with all modes is included with
+        #    THIS message only (since reply_markup is the inline kb here).
+        # Telegram allows ONE reply_markup per message, so we send the inline
+        # menu first and the persistent keyboard separately as a tiny prompt.
+        await message.answer("Меню всегда снизу 👇", reply_markup=MAIN_MENU_RKB)
         await message.answer(
             f"{label} • осталось дней: {left}\n\nВыбери режим:",
             reply_markup=kb.as_markup()
@@ -4200,6 +4263,22 @@ async def inline_pnl(query: InlineQuery):
 # =====================================================
 async def on_startup():
     await get_http_session()
+    # Register the slash-command menu (the "/" picker next to text input).
+    try:
+        await bot.set_my_commands([
+            BotCommand(command="start",    description="Главное меню"),
+            BotCommand(command="menu",     description="Главное меню"),
+            BotCommand(command="signal",   description="Быстрый скрин из текста"),
+            BotCommand(command="series",   description="Сводка по последним сделкам"),
+            BotCommand(command="history",  description="История последних карточек"),
+            BotCommand(command="profile",  description="Мой профиль"),
+            BotCommand(command="referral", description="Мой реферальный код"),
+        ])
+        # Replace the paperclip-area button with a "Menu" button that opens the
+        # commands list directly — saves the user from typing "/".
+        await bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+    except Exception as e:
+        logger.warning(f"Failed to set bot commands menu: {e}")
 
 async def on_shutdown():
     if _HTTP_SESSION and not _HTTP_SESSION.closed:
