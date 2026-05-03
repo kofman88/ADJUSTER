@@ -11,7 +11,13 @@ logger = logging.getLogger(__name__)
 
 from cachetools import TTLCache
 import aiohttp
-from access import activate_trial, grant_access, revoke_access, check_access, days_left, check_daily_limit, increment_usage, get_referral_code, get_referral_stats, use_referral
+from access import (
+    activate_trial, grant_access, revoke_access, check_access, days_left,
+    check_daily_limit, increment_usage,
+    get_referral_code, get_referral_stats, use_referral,
+    get_profile, update_profile, clear_profile,
+    add_history, get_history,
+)
 from i18n import get_lang, set_lang
 
 ADMIN_ID = int(os.getenv("ADMIN_ID", "445677777"))
@@ -122,6 +128,9 @@ class SignalForm(StatesGroup):
     datetime_str = State()
     preview     = State()   # final card draft with [✏️ Edit X] / [✅ Send] / [❌ Cancel]
     edit_value  = State()   # transient — waiting for new text/number for the field being edited
+
+class ProfileForm(StatesGroup):
+    edit_value = State()    # transient — waiting for new value for profile field
 
 BASE_H = 467
 
@@ -257,6 +266,8 @@ def get_main_kb() -> InlineKeyboardMarkup:
     if _MAIN_KB_MARKUP is None:
         kb = InlineKeyboardBuilder()
         kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
+        kb.button(text="🕘 История", callback_data="history_show")
+        kb.button(text="👤 Профиль", callback_data="profile_show")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
         kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
@@ -280,6 +291,8 @@ async def start(message: Message):
         label = "🔓 Пробный" if reason == "trial" else "✅ Полный доступ"
         kb = InlineKeyboardBuilder()
         kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
+        kb.button(text="🕘 История", callback_data="history_show")
+        kb.button(text="👤 Профиль", callback_data="profile_show")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
         kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
@@ -482,14 +495,83 @@ async def _handle_signal_text(msg: Message, state: FSMContext, text: str):
             )
             return
     await state.clear()
-    await state.update_data(_sig=parsed)
-    summary = _signal_summary(parsed)
+    # Pre-fill from saved profile so the flow can skip exchange/username/referral
+    # for return users. _profile_defaults is consumed by _signal_advance and
+    # stripped before persisting to history.
+    profile = get_profile(msg.from_user.id)
+    parsed["_profile_defaults"] = {
+        "exchange": profile.get("exchange"),
+        "username": profile.get("username"),
+        "referral": profile.get("referral"),
+    }
     if parsed["entry"] is None and parsed["tps"]:
-        # No entry — ask for entry as a chosen TP first? Use first TP as entry.
-        await state.update_data(_sig={**parsed, "entry": parsed["tps"][0]})
-        summary += f"\n  (entry не найден — взял TP1 = {parsed['tps'][0]})"
-    await msg.answer(summary + "\n\nКакую цену выхода взять?", reply_markup=_signal_exit_kb(parsed))
+        parsed["entry"] = parsed["tps"][0]
+        await msg.answer(_signal_summary(parsed) + f"\n  (entry не найден — взял TP1 = {parsed['tps'][0]})\n\nКакую цену выхода взять?",
+                         reply_markup=_signal_exit_kb(parsed))
+    else:
+        await msg.answer(_signal_summary(parsed) + "\n\nКакую цену выхода взять?",
+                         reply_markup=_signal_exit_kb(parsed))
+    await state.update_data(_sig=parsed)
     await state.set_state(SignalForm.exit_choice)
+
+
+async def _signal_advance(target, state: FSMContext):
+    """Look at current `_sig` draft and route to the next missing field, or to
+    preview when everything is filled. Honours `_profile_defaults` so saved
+    user defaults (exchange / username / referral) silently skip those prompts."""
+    data = await state.get_data()
+    sig = dict(data.get("_sig", {}))
+    defaults = sig.get("_profile_defaults", {}) or {}
+
+    # 1) exchange
+    if "exchange" not in sig:
+        if defaults.get("exchange"):
+            sig["exchange"] = defaults["exchange"]
+            await state.update_data(_sig=sig)
+        else:
+            await target.answer("📊 Биржа?", reply_markup=_SIG_EXCHANGE_KB)
+            await state.set_state(SignalForm.exchange)
+            return
+    # 2) status
+    if "status" not in sig:
+        await target.answer("📈 Состояние сделки?", reply_markup=_SIG_STATUS_KB)
+        await state.set_state(SignalForm.status)
+        return
+    # 3) BingX template
+    if sig.get("exchange") == "bingx" and "template" not in sig:
+        await target.answer("🎨 Шаблон BingX?", reply_markup=_SIG_TEMPLATE_KB)
+        await state.set_state(SignalForm.template)
+        return
+    # 4) leverage (always required, never auto-filled)
+    if "leverage" not in sig:
+        await target.answer("⚖️ Введите плечо (например 50):")
+        await state.set_state(SignalForm.leverage)
+        return
+    # 5) username — `is not None` so a saved empty-string ("always blank") still skips
+    if "username" not in sig:
+        if defaults.get("username") is not None:
+            sig["username"] = defaults["username"]
+            await state.update_data(_sig=sig)
+        else:
+            await target.answer("👤 Имя пользователя? (или пропусти)", reply_markup=skip_kb)
+            await state.set_state(SignalForm.username)
+            return
+    # 6) referral
+    if "referral" not in sig:
+        if defaults.get("referral") is not None:
+            sig["referral"] = defaults["referral"]
+            await state.update_data(_sig=sig)
+        else:
+            await target.answer("🎁 Реферальный код? (или пропусти)", reply_markup=skip_kb)
+            await state.set_state(SignalForm.referral)
+            return
+    # 7) datetime (BingX only)
+    if sig.get("exchange") == "bingx" and "datetime_str" not in sig:
+        await target.answer("📅 Дата/время? (или пропусти, например 02/14 19:00)", reply_markup=skip_kb)
+        await state.set_state(SignalForm.datetime_str)
+        return
+    # 8) all fields present → preview
+    await _render_preview(target, state)
 
 
 @dp.callback_query(SignalForm.exit_choice, F.data.startswith("sig_exit:"))
@@ -505,7 +587,6 @@ async def signal_pick_exit(call: CallbackQuery, state: FSMContext):
     else:
         await call.answer()
         await call.message.answer("Введите свою цену выхода:")
-        # Repurpose state — wait for any text
         await state.update_data(_sig_awaiting_custom_exit=True)
         return
     if exit_price is None:
@@ -515,8 +596,7 @@ async def signal_pick_exit(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try: await call.message.delete()
     except Exception: pass
-    await call.message.answer("📊 Биржа?", reply_markup=_SIG_EXCHANGE_KB)
-    await state.set_state(SignalForm.exchange)
+    await _signal_advance(call.message, state)
 
 
 @dp.message(SignalForm.exit_choice)
@@ -529,8 +609,7 @@ async def signal_custom_exit(msg: Message, state: FSMContext):
     parsed = data.get("_sig", {})
     await state.update_data(_sig={**parsed, "exit": val}, _sig_awaiting_custom_exit=False)
     await safe_delete_message(msg)
-    await msg.answer("📊 Биржа?", reply_markup=_SIG_EXCHANGE_KB)
-    await state.set_state(SignalForm.exchange)
+    await _signal_advance(msg, state)
 
 
 @dp.callback_query(SignalForm.exchange, F.data.startswith("sig_ex:"))
@@ -541,25 +620,18 @@ async def signal_pick_exchange(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try: await call.message.delete()
     except Exception: pass
-    await call.message.answer("📈 Состояние сделки?", reply_markup=_SIG_STATUS_KB)
-    await state.set_state(SignalForm.status)
+    await _signal_advance(call.message, state)
 
 
 @dp.callback_query(SignalForm.status, F.data.startswith("sig_st:"))
 async def signal_pick_status(call: CallbackQuery, state: FSMContext):
     status = call.data.split(":", 1)[1]
     data = await state.get_data()
-    sig = {**data["_sig"], "status": status}
-    await state.update_data(_sig=sig)
+    await state.update_data(_sig={**data["_sig"], "status": status})
     await call.answer()
     try: await call.message.delete()
     except Exception: pass
-    if sig.get("exchange") == "bingx":
-        await call.message.answer("🎨 Шаблон BingX?", reply_markup=_SIG_TEMPLATE_KB)
-        await state.set_state(SignalForm.template)
-    else:
-        await call.message.answer("⚖️ Введите плечо (например 50):")
-        await state.set_state(SignalForm.leverage)
+    await _signal_advance(call.message, state)
 
 
 @dp.callback_query(SignalForm.template, F.data.startswith("sig_tpl:"))
@@ -570,8 +642,7 @@ async def signal_pick_template(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try: await call.message.delete()
     except Exception: pass
-    await call.message.answer("⚖️ Введите плечо (например 50):")
-    await state.set_state(SignalForm.leverage)
+    await _signal_advance(call.message, state)
 
 
 @dp.message(SignalForm.leverage)
@@ -585,8 +656,7 @@ async def signal_leverage(msg: Message, state: FSMContext):
     data = await state.get_data()
     await state.update_data(_sig={**data["_sig"], "leverage": f"{lev:g}x"})
     await safe_delete_message(msg)
-    await msg.answer("👤 Имя пользователя? (или пропусти)", reply_markup=skip_kb)
-    await state.set_state(SignalForm.username)
+    await _signal_advance(msg, state)
 
 
 @dp.callback_query(SignalForm.username, F.data == "skip_field")
@@ -596,8 +666,7 @@ async def signal_skip_username(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try: await call.message.delete()
     except Exception: pass
-    await call.message.answer("🎁 Реферальный код? (или пропусти)", reply_markup=skip_kb)
-    await state.set_state(SignalForm.referral)
+    await _signal_advance(call.message, state)
 
 
 @dp.message(SignalForm.username)
@@ -606,8 +675,7 @@ async def signal_username(msg: Message, state: FSMContext):
     data = await state.get_data()
     await state.update_data(_sig={**data["_sig"], "username": text})
     await safe_delete_message(msg)
-    await msg.answer("🎁 Реферальный код? (или пропусти)", reply_markup=skip_kb)
-    await state.set_state(SignalForm.referral)
+    await _signal_advance(msg, state)
 
 
 @dp.callback_query(SignalForm.referral, F.data == "skip_field")
@@ -617,11 +685,7 @@ async def signal_skip_referral(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try: await call.message.delete()
     except Exception: pass
-    if data["_sig"].get("exchange") == "bingx":
-        await call.message.answer("📅 Дата/время? (или пропусти, например 02/14 19:00)", reply_markup=skip_kb)
-        await state.set_state(SignalForm.datetime_str)
-    else:
-        await _signal_finish(call.message, state)
+    await _signal_advance(call.message, state)
 
 
 @dp.message(SignalForm.referral)
@@ -630,11 +694,7 @@ async def signal_referral(msg: Message, state: FSMContext):
     data = await state.get_data()
     await state.update_data(_sig={**data["_sig"], "referral": text})
     await safe_delete_message(msg)
-    if data["_sig"].get("exchange") == "bingx":
-        await msg.answer("📅 Дата/время? (или пропусти, например 02/14 19:00)", reply_markup=skip_kb)
-        await state.set_state(SignalForm.datetime_str)
-    else:
-        await _signal_finish(msg, state)
+    await _signal_advance(msg, state)
 
 
 @dp.callback_query(SignalForm.datetime_str, F.data == "skip_field")
@@ -644,7 +704,7 @@ async def signal_skip_datetime(call: CallbackQuery, state: FSMContext):
     await call.answer()
     try: await call.message.delete()
     except Exception: pass
-    await _signal_finish(call.message, state)
+    await _signal_advance(call.message, state)
 
 
 @dp.message(SignalForm.datetime_str)
@@ -653,7 +713,7 @@ async def signal_datetime(msg: Message, state: FSMContext):
     data = await state.get_data()
     await state.update_data(_sig={**data["_sig"], "datetime_str": text})
     await safe_delete_message(msg)
-    await _signal_finish(msg, state)
+    await _signal_advance(msg, state)
 
 
 def _build_image_data(sig: dict) -> tuple[dict, callable]:
@@ -753,6 +813,16 @@ async def signal_preview_send(call: CallbackQuery, state: FSMContext):
         has_access, _ = check_access(call.from_user.id)
         if not has_access:
             increment_usage(call.from_user.id)
+        # Auto-save profile (exchange always, username/referral only if non-empty
+        # — empty in this signal means "skipped this time", not "clear my profile").
+        try:
+            update_profile(call.from_user.id,
+                           exchange=sig.get("exchange"),
+                           username=(sig.get("username") or None),
+                           referral=(sig.get("referral") or None))
+            add_history(call.from_user.id, sig)
+        except Exception as e:
+            logger.warning(f"profile/history save failed: {e}")
     except Exception as e:
         logger.error(f"Final send render error: {e}")
         await call.message.answer("Ошибка генерации картинки.", reply_markup=restart_kb)
@@ -1309,6 +1379,8 @@ async def trial_access(call: CallbackQuery):
     if activated:
         kb = InlineKeyboardBuilder()
         kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
+        kb.button(text="🕘 История", callback_data="history_show")
+        kb.button(text="👤 Профиль", callback_data="profile_show")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
         kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
@@ -3493,6 +3565,175 @@ async def cmd_lang(message: Message):
         await message.answer("🇬🇧 Language switched to English")
     else:
         await message.answer("🇷🇺 Язык переключён на Русский")
+
+
+# =====================================================
+# USER PROFILE — saved defaults that pre-fill signal flow
+# =====================================================
+def _profile_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✏️ Имя",      callback_data="profile_edit:username"),
+         InlineKeyboardButton(text="✏️ Реф.код",  callback_data="profile_edit:referral")],
+        [InlineKeyboardButton(text="🟡 Bybit",    callback_data="profile_set:exchange:bybit"),
+         InlineKeyboardButton(text="🟢 BingX",    callback_data="profile_set:exchange:bingx")],
+        [InlineKeyboardButton(text="🗑 Сбросить", callback_data="profile_clear")],
+    ])
+
+
+def _profile_text(p: dict) -> str:
+    return (
+        "👤 <b>Твой профиль</b>\n\n"
+        f"Имя:   <code>{p.get('username') or '—'}</code>\n"
+        f"Реф:   <code>{p.get('referral') or '—'}</code>\n"
+        f"Биржа: <code>{p.get('exchange') or '—'}</code>\n\n"
+        "Эти значения подставляются автоматически в «⚡ Быстрый скрин» — "
+        "соответствующие шаги пропускаются. Меняй их в превью или здесь."
+    )
+
+
+@dp.message(Command("profile"))
+async def cmd_profile(message: Message):
+    p = get_profile(message.from_user.id)
+    await message.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+
+
+@dp.callback_query(F.data == "profile_show")
+async def cb_profile_show(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    p = get_profile(call.from_user.id)
+    await call.message.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+
+
+@dp.callback_query(F.data == "profile_clear")
+async def cb_profile_clear(call: CallbackQuery, state: FSMContext):
+    clear_profile(call.from_user.id)
+    await call.answer("✓ Профиль сброшен")
+    try: await call.message.delete()
+    except Exception: pass
+
+
+@dp.callback_query(F.data.startswith("profile_set:"))
+async def cb_profile_set(call: CallbackQuery, state: FSMContext):
+    parts = call.data.split(":", 2)
+    if len(parts) < 3:
+        await call.answer("bad payload", show_alert=True); return
+    _, field, value = parts
+    update_profile(call.from_user.id, **{field: value})
+    await call.answer(f"✓ {field} = {value}")
+    try: await call.message.delete()
+    except Exception: pass
+    p = get_profile(call.from_user.id)
+    await call.message.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+
+
+@dp.callback_query(F.data.startswith("profile_edit:"))
+async def cb_profile_edit(call: CallbackQuery, state: FSMContext):
+    field = call.data.split(":", 1)[1]
+    if field not in ("username", "referral"):
+        await call.answer("Это поле меняется кнопкой биржи.", show_alert=True); return
+    await state.update_data(_profile_editing_field=field)
+    await call.answer()
+    prompts = {
+        "username": "Введите имя пользователя (или /clear чтобы очистить):",
+        "referral": "Введите реферальный код (или /clear чтобы очистить):",
+    }
+    await call.message.answer(prompts[field])
+    await state.set_state(ProfileForm.edit_value)
+
+
+@dp.message(ProfileForm.edit_value)
+async def msg_profile_edit_value(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    field = data.get("_profile_editing_field")
+    if not field:
+        await state.clear(); return
+    txt = (msg.text or "").strip()
+    if txt == "/clear":
+        update_profile(msg.from_user.id, **{field: ""})
+        await msg.answer(f"✓ {_field_title(field)} очищено")
+    else:
+        update_profile(msg.from_user.id, **{field: txt[:50]})
+        await msg.answer(f"✓ {_field_title(field)} = <code>{txt[:50]}</code>", parse_mode="HTML")
+    await state.clear()
+    p = get_profile(msg.from_user.id)
+    await msg.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+
+
+# =====================================================
+# SIGNAL HISTORY — last N rendered cards, "repeat" loads draft into preview
+# =====================================================
+def _history_label(sig: dict, idx: int) -> str:
+    sym  = sig.get("symbol", "?")
+    side = "Лонг" if sig.get("side") == "long" else "Шорт"
+    lev  = sig.get("leverage", "—")
+    try:
+        entry = float(sig["entry"])
+        exit_price = float(sig["exit"])
+        lev_n = float(str(sig.get("leverage", "1x")).lower().replace("x", ""))
+        pnl = ((exit_price - entry) / entry * 100) * lev_n if sig.get("side") == "long" \
+              else ((entry - exit_price) / entry * 100) * lev_n
+        return f"{idx+1}. {sym} {side} {lev} {pnl:+.1f}%"
+    except Exception:
+        return f"{idx+1}. {sym} {side} {lev}"
+
+
+def _history_kb(items: list) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(text=_history_label(s, i),
+                                   callback_data=f"hist_use:{i}")] for i, s in enumerate(items)]
+    rows.append([InlineKeyboardButton(text="❌ Закрыть", callback_data="hist_close")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.message(Command("history"))
+async def cmd_history(message: Message):
+    items = get_history(message.from_user.id)
+    if not items:
+        await message.answer("📭 История пуста — сначала создай хотя бы один скрин.")
+        return
+    await message.answer("🕘 <b>Последние сигналы</b>\nТапни запись чтобы открыть в превью и поправить:",
+                         parse_mode="HTML", reply_markup=_history_kb(items))
+
+
+@dp.callback_query(F.data == "history_show")
+async def cb_history_show(call: CallbackQuery, state: FSMContext):
+    items = get_history(call.from_user.id)
+    await call.answer()
+    if not items:
+        await call.message.answer("📭 История пуста — сначала создай хотя бы один скрин.")
+        return
+    await call.message.answer("🕘 <b>Последние сигналы</b>\nТапни запись чтобы открыть в превью и поправить:",
+                              parse_mode="HTML", reply_markup=_history_kb(items))
+
+
+@dp.callback_query(F.data == "hist_close")
+async def cb_history_close(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+
+
+@dp.callback_query(F.data.startswith("hist_use:"))
+async def cb_history_use(call: CallbackQuery, state: FSMContext):
+    has_access, _ = check_access(call.from_user.id)
+    if not has_access:
+        can_use, _ = check_daily_limit(call.from_user.id)
+        if not can_use:
+            await call.answer("🔒 Лимит 3 бесплатных скрина в день исчерпан.", show_alert=True)
+            return
+    try: idx = int(call.data.split(":", 1)[1])
+    except ValueError:
+        await call.answer("bad index", show_alert=True); return
+    items = get_history(call.from_user.id)
+    if idx < 0 or idx >= len(items):
+        await call.answer("Запись не найдена", show_alert=True); return
+    sig = {k: v for k, v in items[idx].items() if not str(k).startswith("_")}
+    await state.clear()
+    await state.update_data(_sig=sig)
+    await call.answer("Загружено в превью")
+    try: await call.message.delete()
+    except Exception: pass
+    await _render_preview(call.message, state)
+
 
 # =====================================================
 # INLINE MODE
