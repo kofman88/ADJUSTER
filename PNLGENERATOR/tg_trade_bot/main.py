@@ -898,6 +898,20 @@ async def signal_preview_send(call: CallbackQuery, state: FSMContext):
             add_history(call.from_user.id, sig)
         except Exception as e:
             logger.warning(f"profile/history save failed: {e}")
+        # Autopost to user's saved channel, if any.
+        profile = get_profile(call.from_user.id)
+        chan = profile.get("channel")
+        if chan:
+            side_ru = "Лонг" if sig["side"] == "long" else "Шорт"
+            chan_caption = (f"📊 {sig['symbol']} • {side_ru} {sig.get('leverage','')} • "
+                            f"<b>{image_data['pnl']:+.2f}%</b>")
+            try:
+                await bot.send_photo(chan, FSInputFile(path), caption=chan_caption,
+                                     parse_mode="HTML")
+                await call.message.answer(f"📢 Также опубликовано в {chan}")
+            except Exception as e:
+                logger.warning(f"Channel autopost failed for {call.from_user.id} → {chan}: {e}")
+                await call.message.answer(f"⚠️ Не получилось запостить в канал {chan}: {e}")
     except Exception as e:
         logger.error(f"Final send render error: {e}")
         await call.message.answer("Ошибка генерации картинки.", reply_markup=restart_kb)
@@ -951,7 +965,7 @@ def _field_title(field: str) -> str:
         "leverage": "плечо", "entry": "цена входа", "exit": "цена выхода",
         "username": "имя", "referral": "реф.код", "datetime_str": "дата",
         "exchange": "биржа", "status": "состояние", "side": "сторона",
-        "template": "шаблон",
+        "template": "шаблон", "channel": "канал",
     }.get(field, field)
 
 
@@ -3639,38 +3653,50 @@ async def cmd_lang(message: Message):
 # =====================================================
 # USER PROFILE — saved defaults that pre-fill signal flow
 # =====================================================
-def _profile_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(inline_keyboard=[
+def _profile_kb(has_channel: bool = False) -> InlineKeyboardMarkup:
+    rows = [
         [InlineKeyboardButton(text="✏️ Имя",      callback_data="profile_edit:username"),
          InlineKeyboardButton(text="✏️ Реф.код",  callback_data="profile_edit:referral")],
         [InlineKeyboardButton(text="🟡 Bybit",    callback_data="profile_set:exchange:bybit"),
          InlineKeyboardButton(text="🟢 BingX",    callback_data="profile_set:exchange:bingx")],
-        [InlineKeyboardButton(text="🗑 Сбросить", callback_data="profile_clear")],
-    ])
+        [InlineKeyboardButton(text="📢 Канал",    callback_data="profile_edit:channel")],
+    ]
+    if has_channel:
+        rows[-1].append(InlineKeyboardButton(text="🚫 Откл. канал",
+                                              callback_data="profile_clear_channel"))
+    rows.append([InlineKeyboardButton(text="🗑 Сбросить", callback_data="profile_clear")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _profile_text(p: dict) -> str:
+    chan = p.get("channel")
+    chan_line = f"Канал: <code>{chan}</code>\n" if chan else ""
     return (
         "👤 <b>Твой профиль</b>\n\n"
         f"Имя:   <code>{p.get('username') or '—'}</code>\n"
         f"Реф:   <code>{p.get('referral') or '—'}</code>\n"
-        f"Биржа: <code>{p.get('exchange') or '—'}</code>\n\n"
+        f"Биржа: <code>{p.get('exchange') or '—'}</code>\n"
+        f"{chan_line}"
+        "\n"
         "Эти значения подставляются автоматически в «⚡ Быстрый скрин» — "
-        "соответствующие шаги пропускаются. Меняй их в превью или здесь."
+        "соответствующие шаги пропускаются. Меняй их в превью или здесь.\n"
+        "Канал — если задан, бот публикует туда финальную карточку после ✅ Отправить."
     )
 
 
 @dp.message(Command("profile"))
 async def cmd_profile(message: Message):
     p = get_profile(message.from_user.id)
-    await message.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+    await message.answer(_profile_text(p), parse_mode="HTML",
+                         reply_markup=_profile_kb(bool(p.get("channel"))))
 
 
 @dp.callback_query(F.data == "profile_show")
 async def cb_profile_show(call: CallbackQuery, state: FSMContext):
     await call.answer()
     p = get_profile(call.from_user.id)
-    await call.message.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+    await call.message.answer(_profile_text(p), parse_mode="HTML",
+                              reply_markup=_profile_kb(bool(p.get("channel"))))
 
 
 @dp.callback_query(F.data == "profile_clear")
@@ -3692,22 +3718,54 @@ async def cb_profile_set(call: CallbackQuery, state: FSMContext):
     try: await call.message.delete()
     except Exception: pass
     p = get_profile(call.from_user.id)
-    await call.message.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+    await call.message.answer(_profile_text(p), parse_mode="HTML",
+                              reply_markup=_profile_kb(bool(p.get("channel"))))
 
 
 @dp.callback_query(F.data.startswith("profile_edit:"))
 async def cb_profile_edit(call: CallbackQuery, state: FSMContext):
     field = call.data.split(":", 1)[1]
-    if field not in ("username", "referral"):
+    if field not in ("username", "referral", "channel"):
         await call.answer("Это поле меняется кнопкой биржи.", show_alert=True); return
     await state.update_data(_profile_editing_field=field)
     await call.answer()
     prompts = {
         "username": "Введите имя пользователя (или /clear чтобы очистить):",
         "referral": "Введите реферальный код (или /clear чтобы очистить):",
+        "channel":  ("Пришли @username канала (или -100… для приватного).\n"
+                     "Бот должен быть админом этого канала с правом постить.\n"
+                     "/clear — отвязать канал."),
     }
     await call.message.answer(prompts[field])
     await state.set_state(ProfileForm.edit_value)
+
+
+@dp.callback_query(F.data == "profile_clear_channel")
+async def cb_profile_clear_channel(call: CallbackQuery, state: FSMContext):
+    update_profile(call.from_user.id, channel="")
+    await call.answer("✓ Канал отключён")
+    try: await call.message.delete()
+    except Exception: pass
+    p = get_profile(call.from_user.id)
+    await call.message.answer(_profile_text(p), parse_mode="HTML",
+                              reply_markup=_profile_kb(bool(p.get("channel"))))
+
+
+async def _validate_user_channel(channel: str) -> tuple[bool, str]:
+    """Try to resolve the channel and check that the bot is admin there.
+    Returns (ok, human_message)."""
+    try:
+        chat = await bot.get_chat(channel)
+    except Exception as e:
+        return False, f"Не нашёл канал: {e}"
+    try:
+        me = await bot.get_me()
+        member = await bot.get_chat_member(chat.id, me.id)
+    except Exception as e:
+        return False, f"Не смог проверить статус бота в канале: {e}"
+    if member.status not in ("administrator", "creator"):
+        return False, "Бот должен быть админом канала с правом постить сообщения."
+    return True, f"✓ Канал «{chat.title}» подключён"
 
 
 @dp.message(ProfileForm.edit_value)
@@ -3720,12 +3778,21 @@ async def msg_profile_edit_value(msg: Message, state: FSMContext):
     if txt == "/clear":
         update_profile(msg.from_user.id, **{field: ""})
         await msg.answer(f"✓ {_field_title(field)} очищено")
+    elif field == "channel":
+        # Validate first — if it fails we don't save.
+        ok, message_text = await _validate_user_channel(txt)
+        if not ok:
+            await msg.answer(f"❌ {message_text}\n\nПопробуй ещё раз или /clear.")
+            return  # keep the same state so user can retry
+        update_profile(msg.from_user.id, channel=txt[:64])
+        await msg.answer(message_text)
     else:
         update_profile(msg.from_user.id, **{field: txt[:50]})
         await msg.answer(f"✓ {_field_title(field)} = <code>{txt[:50]}</code>", parse_mode="HTML")
     await state.clear()
     p = get_profile(msg.from_user.id)
-    await msg.answer(_profile_text(p), parse_mode="HTML", reply_markup=_profile_kb())
+    await msg.answer(_profile_text(p), parse_mode="HTML",
+                     reply_markup=_profile_kb(bool(p.get("channel"))))
 
 
 # =====================================================
