@@ -254,6 +254,7 @@ def get_main_kb() -> InlineKeyboardMarkup:
     global _MAIN_KB_MARKUP
     if _MAIN_KB_MARKUP is None:
         kb = InlineKeyboardBuilder()
+        kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
         kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
@@ -276,6 +277,7 @@ async def start(message: Message):
         left = days_left(user_id)
         label = "🔓 Пробный" if reason == "trial" else "✅ Полный доступ"
         kb = InlineKeyboardBuilder()
+        kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
         kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
@@ -412,6 +414,33 @@ _SIG_TEMPLATE_KB = InlineKeyboardMarkup(inline_keyboard=[[
     InlineKeyboardButton(text="🟢 Dot",   callback_data="sig_tpl:dot"),
     InlineKeyboardButton(text="⚽ Football", callback_data="sig_tpl:football"),
 ]])
+
+
+@dp.callback_query(F.data == "quick_signal")
+async def quick_signal_prompt(call: CallbackQuery, state: FSMContext):
+    """Show the user the expected signal format and wait for the next message
+    (auto-detected by signal_auto_detect handler)."""
+    has_access, _ = check_access(call.from_user.id)
+    if not has_access:
+        await call.answer("🔒 Доступ закрыт. Нажми /start и оформи доступ.", show_alert=True)
+        return
+    await state.clear()
+    await call.answer()
+    await call.message.answer(
+        "⚡ <b>Быстрый скрин</b>\n\n"
+        "Пришли следующим сообщением сигнал в любом формате — бот сам распознает.\n"
+        "Минимум: символ + сторона + цены.\n\n"
+        "<b>Пример:</b>\n"
+        "<code>BTCUSDT\n"
+        "Шорт\n"
+        "Вход: 78373\n"
+        "Стоп: 79546\n"
+        "TP1: 76613\n"
+        "TP2: 74893\n"
+        "TP3: 73165</code>\n\n"
+        "Или с эмодзи / в любом другом виде — бот разберёт.",
+        parse_mode="HTML",
+    )
 
 
 @dp.message(Command("signal"))
@@ -1094,6 +1123,7 @@ async def trial_access(call: CallbackQuery):
     activated = activate_trial(user_id)
     if activated:
         kb = InlineKeyboardBuilder()
+        kb.button(text="⚡ Быстрый скрин", callback_data="quick_signal")
         kb.button(text="📊 Bybit", callback_data="exchange_bybit")
         kb.button(text="📊 BingX", callback_data="exchange_bingx")
         kb.button(text="🎨 Кастом Bybit", callback_data="custom_bybit")
