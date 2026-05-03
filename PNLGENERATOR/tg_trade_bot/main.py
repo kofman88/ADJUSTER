@@ -111,6 +111,16 @@ class TradeForm(StatesGroup):
 class MarathonStatesGroup(StatesGroup):
     start_deposit = State()
 
+class SignalForm(StatesGroup):
+    exit_choice = State()
+    exchange    = State()
+    status      = State()
+    template    = State()
+    leverage    = State()
+    username    = State()
+    referral    = State()
+    datetime_str = State()
+
 BASE_H = 467
 
 def scale_font(size: int, img_h: int) -> int:
@@ -352,9 +362,315 @@ async def cmd_users(message: Message):
     await message.answer("👥 Пользователи:\n" + "\n".join(lines))
 
 
+# =====================================================
+# SIGNAL FLOW (paste signal text → bot generates card)
+# =====================================================
+def _signal_summary(parsed: dict) -> str:
+    sym = parsed.get("symbol") or "—"
+    side = {"long": "Лонг", "short": "Шорт"}.get(parsed.get("side"), "—")
+    entry = parsed.get("entry")
+    sl = parsed.get("sl")
+    tps = parsed.get("tps", [])
+    lines = [
+        "📊 Распознал сигнал:",
+        f"  Символ:  {sym}",
+        f"  Сторона: {side}",
+        f"  Вход:    {entry if entry is not None else '—'}",
+        f"  SL:      {sl if sl is not None else '—'}",
+    ]
+    for i, tp in enumerate(tps[:5], 1):
+        lines.append(f"  TP{i}:     {tp}")
+    return "\n".join(lines)
+
+
+def _signal_exit_kb(parsed: dict) -> InlineKeyboardMarkup:
+    """Buttons: TP1/TP2/TP3 (those that exist), SL, Custom."""
+    rows = []
+    tp_row = []
+    for i, tp in enumerate(parsed.get("tps", [])[:3], 1):
+        tp_row.append(InlineKeyboardButton(text=f"TP{i} ({tp})", callback_data=f"sig_exit:tp{i-1}"))
+    if tp_row:
+        rows.append(tp_row)
+    bottom = []
+    if parsed.get("sl") is not None:
+        bottom.append(InlineKeyboardButton(text=f"SL ({parsed['sl']})", callback_data="sig_exit:sl"))
+    bottom.append(InlineKeyboardButton(text="↪︎ Своя цена", callback_data="sig_exit:custom"))
+    rows.append(bottom)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+_SIG_EXCHANGE_KB = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="🟡 Bybit", callback_data="sig_ex:bybit"),
+    InlineKeyboardButton(text="🟢 BingX", callback_data="sig_ex:bingx"),
+]])
+_SIG_STATUS_KB = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="✅ Реализованная (закрытая)", callback_data="sig_st:closed"),
+    InlineKeyboardButton(text="⏳ Нереализованная (открытая)", callback_data="sig_st:open"),
+]])
+_SIG_TEMPLATE_KB = InlineKeyboardMarkup(inline_keyboard=[[
+    InlineKeyboardButton(text="🐳 Whale", callback_data="sig_tpl:whale"),
+    InlineKeyboardButton(text="🟢 Dot",   callback_data="sig_tpl:dot"),
+    InlineKeyboardButton(text="⚽ Football", callback_data="sig_tpl:football"),
+]])
+
+
+@dp.message(Command("signal"))
+async def cmd_signal(msg: Message, state: FSMContext):
+    """Manual /signal — text after the command, or fall back to a help blurb."""
+    text = (msg.text or "").split(None, 1)
+    if len(text) < 2:
+        await msg.answer(
+            "📥 Пришли мне текст сигнала следующим сообщением — пример:\n\n"
+            "<code>📉 $BTC -USDT-SWAP ШОРТ\n"
+            "🎯 Entry: 78,373\n"
+            "🛑 SL: 79,546\n"
+            "✅ TP1: 76,613\n"
+            "✅ TP2: 74,893</code>",
+            parse_mode="HTML",
+        )
+        await state.clear()
+        return
+    await _handle_signal_text(msg, state, text[1])
+
+
+async def _handle_signal_text(msg: Message, state: FSMContext, text: str):
+    parsed = parse_signal(text)
+    if not parsed["symbol"] or not parsed["side"]:
+        await msg.answer("Не смог распознать. Нужны хотя бы символ ($BTC) и сторона (LONG/SHORT).")
+        return
+    if parsed["entry"] is None and not parsed["tps"]:
+        await msg.answer("Не нашёл цены — нужен Entry или TP.")
+        return
+    has_access, _ = check_access(msg.from_user.id)
+    if not has_access:
+        can_use, _ = check_daily_limit(msg.from_user.id)
+        if not can_use:
+            await msg.answer(
+                "🔒 Лимит 3 бесплатных скрина в день исчерпан.\n"
+                f"Напиши {ADMIN_USERNAME} для полного доступа.",
+            )
+            return
+    await state.clear()
+    await state.update_data(_sig=parsed)
+    summary = _signal_summary(parsed)
+    if parsed["entry"] is None and parsed["tps"]:
+        # No entry — ask for entry as a chosen TP first? Use first TP as entry.
+        await state.update_data(_sig={**parsed, "entry": parsed["tps"][0]})
+        summary += f"\n  (entry не найден — взял TP1 = {parsed['tps'][0]})"
+    await msg.answer(summary + "\n\nКакую цену выхода взять?", reply_markup=_signal_exit_kb(parsed))
+    await state.set_state(SignalForm.exit_choice)
+
+
+@dp.callback_query(SignalForm.exit_choice, F.data.startswith("sig_exit:"))
+async def signal_pick_exit(call: CallbackQuery, state: FSMContext):
+    choice = call.data.split(":", 1)[1]
+    data = await state.get_data()
+    parsed = data.get("_sig", {})
+    if choice.startswith("tp"):
+        idx = int(choice[2:])
+        exit_price = parsed["tps"][idx] if idx < len(parsed.get("tps", [])) else None
+    elif choice == "sl":
+        exit_price = parsed.get("sl")
+    else:
+        await call.answer()
+        await call.message.answer("Введите свою цену выхода:")
+        # Repurpose state — wait for any text
+        await state.update_data(_sig_awaiting_custom_exit=True)
+        return
+    if exit_price is None:
+        await call.answer("Не удалось получить цену", show_alert=True)
+        return
+    await state.update_data(_sig={**parsed, "exit": exit_price})
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+    await call.message.answer("📊 Биржа?", reply_markup=_SIG_EXCHANGE_KB)
+    await state.set_state(SignalForm.exchange)
+
+
+@dp.message(SignalForm.exit_choice)
+async def signal_custom_exit(msg: Message, state: FSMContext):
+    data = await state.get_data()
+    if not data.get("_sig_awaiting_custom_exit"):
+        return
+    val = await parse_float(msg)
+    if val is None: return
+    parsed = data.get("_sig", {})
+    await state.update_data(_sig={**parsed, "exit": val}, _sig_awaiting_custom_exit=False)
+    await safe_delete_message(msg)
+    await msg.answer("📊 Биржа?", reply_markup=_SIG_EXCHANGE_KB)
+    await state.set_state(SignalForm.exchange)
+
+
+@dp.callback_query(SignalForm.exchange, F.data.startswith("sig_ex:"))
+async def signal_pick_exchange(call: CallbackQuery, state: FSMContext):
+    exchange = call.data.split(":", 1)[1]
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "exchange": exchange})
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+    await call.message.answer("📈 Состояние сделки?", reply_markup=_SIG_STATUS_KB)
+    await state.set_state(SignalForm.status)
+
+
+@dp.callback_query(SignalForm.status, F.data.startswith("sig_st:"))
+async def signal_pick_status(call: CallbackQuery, state: FSMContext):
+    status = call.data.split(":", 1)[1]
+    data = await state.get_data()
+    sig = {**data["_sig"], "status": status}
+    await state.update_data(_sig=sig)
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+    if sig.get("exchange") == "bingx":
+        await call.message.answer("🎨 Шаблон BingX?", reply_markup=_SIG_TEMPLATE_KB)
+        await state.set_state(SignalForm.template)
+    else:
+        await call.message.answer("⚖️ Введите плечо (например 50):")
+        await state.set_state(SignalForm.leverage)
+
+
+@dp.callback_query(SignalForm.template, F.data.startswith("sig_tpl:"))
+async def signal_pick_template(call: CallbackQuery, state: FSMContext):
+    tpl = call.data.split(":", 1)[1]
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "template": tpl})
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+    await call.message.answer("⚖️ Введите плечо (например 50):")
+    await state.set_state(SignalForm.leverage)
+
+
+@dp.message(SignalForm.leverage)
+async def signal_leverage(msg: Message, state: FSMContext):
+    try:
+        lev = float((msg.text or "").strip().lower().replace("x", ""))
+        if lev < 1 or lev > 200: raise ValueError
+    except ValueError:
+        await msg.answer("Введите число от 1 до 200")
+        return
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "leverage": f"{lev:g}x"})
+    await safe_delete_message(msg)
+    await msg.answer("👤 Имя пользователя? (или пропусти)", reply_markup=skip_kb)
+    await state.set_state(SignalForm.username)
+
+
+@dp.callback_query(SignalForm.username, F.data == "skip_field")
+async def signal_skip_username(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "username": ""})
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+    await call.message.answer("🎁 Реферальный код? (или пропусти)", reply_markup=skip_kb)
+    await state.set_state(SignalForm.referral)
+
+
+@dp.message(SignalForm.username)
+async def signal_username(msg: Message, state: FSMContext):
+    text = (msg.text or "").strip()[:50]
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "username": text})
+    await safe_delete_message(msg)
+    await msg.answer("🎁 Реферальный код? (или пропусти)", reply_markup=skip_kb)
+    await state.set_state(SignalForm.referral)
+
+
+@dp.callback_query(SignalForm.referral, F.data == "skip_field")
+async def signal_skip_referral(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "referral": ""})
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+    if data["_sig"].get("exchange") == "bingx":
+        await call.message.answer("📅 Дата/время? (или пропусти, например 02/14 19:00)", reply_markup=skip_kb)
+        await state.set_state(SignalForm.datetime_str)
+    else:
+        await _signal_finish(call.message, state)
+
+
+@dp.message(SignalForm.referral)
+async def signal_referral(msg: Message, state: FSMContext):
+    text = (msg.text or "").strip()[:30]
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "referral": text})
+    await safe_delete_message(msg)
+    if data["_sig"].get("exchange") == "bingx":
+        await msg.answer("📅 Дата/время? (или пропусти, например 02/14 19:00)", reply_markup=skip_kb)
+        await state.set_state(SignalForm.datetime_str)
+    else:
+        await _signal_finish(msg, state)
+
+
+@dp.callback_query(SignalForm.datetime_str, F.data == "skip_field")
+async def signal_skip_datetime(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "datetime_str": ""})
+    await call.answer()
+    try: await call.message.delete()
+    except Exception: pass
+    await _signal_finish(call.message, state)
+
+
+@dp.message(SignalForm.datetime_str)
+async def signal_datetime(msg: Message, state: FSMContext):
+    text = (msg.text or "").strip()[:20]
+    data = await state.get_data()
+    await state.update_data(_sig={**data["_sig"], "datetime_str": text})
+    await safe_delete_message(msg)
+    await _signal_finish(msg, state)
+
+
+async def _signal_finish(msg, state: FSMContext):
+    data = await state.get_data()
+    sig = data["_sig"]
+    entry = sig["entry"]
+    exit_price = sig["exit"]
+    side = sig["side"]
+    lev_raw = sig.get("leverage", "1x").lower().replace("x", "")
+    try: leverage = float(lev_raw)
+    except ValueError: leverage = 1.0
+    pnl_percent = ((exit_price - entry) / entry * 100) * leverage if side == "long" \
+                  else ((entry - exit_price) / entry * 100) * leverage
+    image_data = {
+        "username": sig.get("username", ""),
+        "symbol":   sig["symbol"],
+        "pnl":      round(pnl_percent, 2),
+        "entry":    entry,
+        "exit":     exit_price,
+        "side":     side,
+        "referral": sig.get("referral", ""),
+        "leverage": sig["leverage"],
+        "status":   sig.get("status", "closed"),
+    }
+    if sig["exchange"] == "bingx":
+        image_data["template"]     = sig.get("template", "football")
+        image_data["datetime_str"] = sig.get("datetime_str", "")
+        gen_func = generate_custom_bingx_image
+    else:
+        gen_func = generate_custom_bybit_image
+    loop = asyncio.get_event_loop()
+    try:
+        path = await loop.run_in_executor(_THREAD_POOL, gen_func, image_data)
+        await msg.answer_photo(FSInputFile(path), reply_markup=restart_kb)
+        has_access, _ = check_access(msg.from_user.id)
+        if not has_access:
+            increment_usage(msg.from_user.id)
+    except Exception as e:
+        logger.error(f"Signal render error: {e}")
+        await msg.answer("Ошибка генерации картинки.", reply_markup=restart_kb)
+    await state.clear()
+
+
 @dp.message(Command("test_all"))
 async def test_all(message: Message):
     text = (
+        "Из сигнала: пришли любой текст с символом + LONG/SHORT + ценами,\n"
+        "или /signal <текст> — бот сам распознает и сгенерит карточку.\n\n"
         "Эталоны (точная копия assets/*/JPG):\n"
         "/test_ref_all  ← разом все 11\n"
         "  /test_ref_bingx_long_whale\n"
@@ -1681,6 +1997,97 @@ def _legacy_generate_trade_image(data: dict, percent: float, pnl: float, pnl_usd
 
 
 # =====================================================
+# SIGNAL PARSER (free-form text → structured trade)
+# =====================================================
+import re as _re_signal
+
+_SIGNAL_NUMBER_RX = r'(?<!\w)[\d,]+(?:\.\d+)?'
+_SIGNAL_BLACKLIST = {'LONG', 'SHORT', 'ЛОНГ', 'ШОРТ', 'TP', 'SL', 'TARGET', 'STOP',
+                     'ENTRY', 'USDT', 'BUY', 'SELL', 'QUALITY', 'SWAP'}
+
+def _parse_number(s: str):
+    s = s.strip().rstrip('.,').replace(' ', '')
+    if _re_signal.fullmatch(r'\d{1,3}(,\d{3})+(\.\d+)?', s):
+        return float(s.replace(',', ''))
+    if _re_signal.fullmatch(r'\d+,\d+', s):
+        return float(s.replace(',', '.'))
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+def parse_signal(text: str) -> dict:
+    """Extract a trade signal from free-form text.
+
+    Returns: {symbol, side, entry, sl, tps[]}.
+    Symbol always normalised to TICKERUSDT. Side is "long"/"short"/None.
+    Numbers may have thousands-comma (78,373) or decimal (2284.36 / 5,42).
+    """
+    t = _re_signal.sub(r'[​-‏⁠﻿]', '', text)  # strip zero-width chars
+    out = {"symbol": None, "side": None, "entry": None, "sl": None, "tps": []}
+
+    # Symbol — prefer $TICKER, then TICKER-USDT / TICKERUSDT.
+    sym = None
+    for m in _re_signal.finditer(r'\$([A-Z][A-Z0-9]{1,9})\b', t.upper()):
+        cand = m.group(1)
+        if cand in _SIGNAL_BLACKLIST: continue
+        sym = cand if cand.endswith("USDT") else cand + "USDT"
+        break
+    if not sym:
+        for m in _re_signal.finditer(r'\b([A-Z][A-Z0-9]{1,9})[\s/_-]*USDT(?:[-_]SWAP)?\b', t.upper()):
+            cand = m.group(1)
+            if cand in _SIGNAL_BLACKLIST: continue
+            sym = cand + "USDT"
+            break
+    out["symbol"] = sym
+
+    if _re_signal.search(r'\bШОРТ\b|\bSHORT\b', t, _re_signal.I) or '📉' in t:
+        out["side"] = "short"
+    elif _re_signal.search(r'\bЛОНГ\b|\bLONG\b', t, _re_signal.I) or '📈' in t:
+        out["side"] = "long"
+
+    def find_num_after(keywords):
+        for kw in keywords:
+            for m in _re_signal.finditer(_re_signal.escape(kw), t, _re_signal.I):
+                if m.start() > 0 and t[m.start()-1].isalpha(): continue
+                tail = t[m.end():m.end()+80]
+                n = _re_signal.search(_SIGNAL_NUMBER_RX, tail)
+                if n:
+                    v = _parse_number(n.group())
+                    if v and v > 0: return v
+        return None
+
+    out["entry"] = find_num_after(['Entry', 'Вход', 'вход', '🎯'])
+    out["sl"]    = find_num_after(['SL', 'Стоп', 'Stop', '🛑'])
+
+    seen_offsets = set()
+    def add_tp(v):
+        if v and v > 0 and v not in out["tps"]:
+            out["tps"].append(v)
+    for kw in (f'TP{i}' for i in range(1, 10)):
+        for m in _re_signal.finditer(_re_signal.escape(kw) + r'\b', t, _re_signal.I):
+            seen_offsets.add(m.start())
+            n = _re_signal.search(_SIGNAL_NUMBER_RX, t[m.end():m.end()+80])
+            if n: add_tp(_parse_number(n.group()))
+    for kw in ('TP', 'Тейк', 'Take', 'Target', '✅'):
+        pat = (_re_signal.compile(r'\b' + _re_signal.escape(kw) + r'\b', _re_signal.I)
+               if kw.isalpha() else _re_signal.compile(_re_signal.escape(kw), _re_signal.I))
+        for m in pat.finditer(t):
+            if m.start() in seen_offsets: continue
+            seen_offsets.add(m.start())
+            n = _re_signal.search(_SIGNAL_NUMBER_RX, t[m.end():m.end()+80])
+            if n: add_tp(_parse_number(n.group()))
+    return out
+
+
+def looks_like_signal(text: str) -> bool:
+    """Quick check whether a free-form message looks like a trade signal."""
+    if not text or len(text) < 10: return False
+    parsed = parse_signal(text)
+    return bool(parsed["symbol"] and parsed["side"] and (parsed["entry"] or parsed["tps"]))
+
+
+# =====================================================
 # КАСТОМНЫЕ КАРТИНКИ
 # =====================================================
 def generate_custom_bybit_image(data: dict) -> str:
@@ -2867,6 +3274,17 @@ async def cmd_lang(message: Message):
 # =====================================================
 # INLINE MODE
 # =====================================================
+@dp.message(F.text & ~F.text.startswith("/"))
+async def signal_auto_detect(msg: Message, state: FSMContext):
+    """Auto-detect a free-form trade signal in any text message that isn't part
+    of an active FSM flow and isn't a command."""
+    if await state.get_state() is not None:
+        return  # Inside an active FSM — let dedicated handlers deal with it
+    text = msg.text or ""
+    if looks_like_signal(text):
+        await _handle_signal_text(msg, state, text)
+
+
 @dp.inline_query()
 async def inline_pnl(query: InlineQuery):
     """Inline mode: @bot BTCUSDT +150% 50x"""
