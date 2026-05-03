@@ -569,8 +569,8 @@ _REF_TEST_CASES = {
     ),
     "bybit_plus_short": dict(
         render="bybit_share",
-        data={"username":"chmst","symbol":"SUIUSDT","pnl":8.97,"entry":3.4667,"exit":3.4003,
-              "entry_str":"3.46670","exit_str":"3.40030",
+        data={"username":"chmst","symbol":"SUIUSDT","pnl":8.97,"entry":3.4667,"exit":3.4603,
+              "entry_str":"3.46670","exit_str":"3.46030",
               "leverage":"50x","side":"short","referral":"POKOIV","status":"open"},
     ),
     "bybit_minus_long": dict(
