@@ -401,7 +401,7 @@ def _signal_summary(parsed: dict) -> str:
 
 
 def _signal_exit_kb(parsed: dict) -> InlineKeyboardMarkup:
-    """Buttons: TP1/TP2/TP3 (those that exist), SL, Custom."""
+    """Buttons: TP1/TP2/TP3 (those that exist), SL, live-from-exchange, custom."""
     rows = []
     tp_row = []
     for i, tp in enumerate(parsed.get("tps", [])[:3], 1):
@@ -411,6 +411,7 @@ def _signal_exit_kb(parsed: dict) -> InlineKeyboardMarkup:
     bottom = []
     if parsed.get("sl") is not None:
         bottom.append(InlineKeyboardButton(text=f"SL ({parsed['sl']})", callback_data="sig_exit:sl"))
+    bottom.append(InlineKeyboardButton(text="📡 Сейчас (с биржи)", callback_data="sig_exit:live"))
     bottom.append(InlineKeyboardButton(text="↪︎ Своя цена", callback_data="sig_exit:custom"))
     rows.append(bottom)
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -532,6 +533,21 @@ async def _signal_advance(target, state: FSMContext):
             await target.answer("📊 Биржа?", reply_markup=_SIG_EXCHANGE_KB)
             await state.set_state(SignalForm.exchange)
             return
+    # 1b) live exit fetch — only possible once exchange is known.
+    # Marker is set by signal_pick_exit when user taps «📡 Сейчас (с биржи)».
+    if sig.pop("_sig_use_live_exit", False):
+        live = await async_get_mark_price(sig["exchange"], sig["symbol"])
+        if live is None:
+            await target.answer(f"Не смог достать цену {sig['symbol']} с {sig['exchange']}. "
+                                "Введи сам или перевыбери биржу.")
+            sig["_sig_use_live_exit"] = True   # restore so retry works
+            await state.update_data(_sig=sig)
+            return
+        sig["exit"] = live
+        sig["_sig_exit_from_live"] = True   # surfaced in preview caption
+        await state.update_data(_sig=sig)
+        await target.answer(f"📡 Цена {sig['symbol']} с {sig['exchange']}: <b>{live}</b>",
+                            parse_mode="HTML")
     # 2) status
     if "status" not in sig:
         await target.answer("📈 Состояние сделки?", reply_markup=_SIG_STATUS_KB)
@@ -584,6 +600,20 @@ async def signal_pick_exit(call: CallbackQuery, state: FSMContext):
         exit_price = parsed["tps"][idx] if idx < len(parsed.get("tps", [])) else None
     elif choice == "sl":
         exit_price = parsed.get("sl")
+    elif choice == "live":
+        # Don't set exit yet — _signal_advance will fetch from the exchange API
+        # once the user has picked one (or it's pre-filled from profile).
+        await state.update_data(_sig={**parsed, "_sig_use_live_exit": True})
+        await call.answer("📡 Подтянем рыночную цену после выбора биржи")
+        try: await call.message.delete()
+        except Exception: pass
+        await _signal_advance(call.message, state)
+        return
+    elif choice == "custom":
+        await call.answer()
+        await call.message.answer("Введите свою цену выхода:")
+        await state.update_data(_sig_awaiting_custom_exit=True)
+        return
     else:
         await call.answer()
         await call.message.answer("Введите свою цену выхода:")
@@ -819,6 +849,7 @@ async def _render_preview(msg, state: FSMContext):
         return
     rate_pct = (BYBIT_TAKER_RATE if sig.get('exchange') == 'bybit'
                 else BINGX_TAKER_RATE) * 100
+    live_tag = " 📡" if sig.get("_sig_exit_from_live") else ""
     summary = (
         f"📋 <b>Черновик</b>\n"
         f"  {sig['symbol']} • {'Лонг' if sig['side']=='long' else 'Шорт'} "
@@ -827,7 +858,7 @@ async def _render_preview(msg, state: FSMContext):
         f"Комиссия: −{image_data['pnl_fee_pct']:.2f}% (taker {rate_pct:.3f}% × 2)\n"
         f"  Биржа: {sig.get('exchange','—')} • Состояние: "
         f"{'Закрыта' if sig.get('status')=='closed' else 'Открыта'}\n"
-        f"  Вход: {sig['entry']} → Выход: {sig['exit']}\n"
+        f"  Вход: {sig['entry']} → Выход: {sig['exit']}{live_tag}\n"
         f"\nТапни поле для правки или ✅ отправить."
     )
     sent = await msg.answer_photo(FSInputFile(path), caption=summary,
